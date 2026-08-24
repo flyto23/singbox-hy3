@@ -174,6 +174,29 @@ set_bind_json() {
     [[ $is_bind_iface ]] && is_bind_json=",bind_interface:\"$is_bind_iface\"$is_bind_json"
 }
 
+# rebuild route.json so each reality inbound uses its own bound direct outbound.
+# sing-box merges config files with arrays replaced (not appended), so all
+# per-node route rules must live in a single file to accumulate correctly.
+build_route_json() {
+    [[ ! -d $is_conf_dir ]] && return
+    is_route_rules=
+    for f in "$is_conf_dir"/*.json; do
+        [[ -f "$f" ]] || continue
+        [[ "$f" == *route.json ]] && continue
+        is_in_tag=$(jq -r '.inbounds[0].tag' "$f" 2>/dev/null)
+        is_out_tag=$(jq -r '.outbounds[]?.tag | select(test("^direct_[0-9]+$"))' "$f" 2>/dev/null | head -1)
+        [[ $is_in_tag && $is_out_tag ]] && {
+            is_route_rules="$is_route_rules,{\"inbound\":[\"$is_in_tag\"],\"outbound\":\"$is_out_tag\"}"
+        }
+    done
+    if [[ $is_route_rules ]]; then
+        is_route_json=$(jq -n "{route:{rules:[${is_route_rules#,}],final:\"direct\"}}")
+        cat <<<$is_route_json >"$is_conf_dir/route.json"
+    else
+        rm -f "$is_conf_dir/route.json"
+    fi
+}
+
 show_list() {
     PS3=''
     COLUMNS=1
@@ -352,9 +375,8 @@ create() {
         [[ $net == "reality" ]] && {
             set_bind_json
             is_add_public_key=",outbounds:[{tag:\"direct_$port\",type:\"direct\"${is_bind_json}},{tag:\"public_key_$is_public_key\",type:\"direct\"${is_bind_json}}]"
-            is_inbound_outbound=",outbound:\"direct_$port\""
-        } || is_inbound_outbound=
-        is_new_json=$(jq "{inbounds:[{tag:\"$is_config_name\",type:\"$is_protocol\",$is_listen,listen_port:$port$is_inbound_outbound,$json_str}]$is_add_public_key}" <<<{})
+        }
+        is_new_json=$(jq "{inbounds:[{tag:\"$is_config_name\",type:\"$is_protocol\",$is_listen,listen_port:$port,$json_str}]$is_add_public_key}" <<<{})
         [[ $is_test_json ]] && return # tmp test
         # only show json, dont save to file.
         [[ $is_gen ]] && {
@@ -367,6 +389,7 @@ create() {
         [[ $is_config_file ]] && is_no_del_msg=1 && del $is_config_file
         # save json to file
         cat <<<$is_new_json >$is_json_file
+        build_route_json
         if [[ $is_new_install ]]; then
             # config.json
             create config.json
@@ -706,6 +729,7 @@ del() {
             pause
         fi
         rm -rf $is_conf_dir/"$is_config_file"
+        [[ ! $is_new_json ]] && build_route_json
         [[ ! $is_new_json ]] && manage restart &
         [[ ! $is_no_del_msg ]] && _green "\n已删除: $is_config_file\n"
 

@@ -70,7 +70,7 @@ is_conf_dir=$is_core_dir/conf
 is_log_dir=/var/log/$is_core
 is_sh_bin=/usr/local/bin/$is_core
 is_sh_dir=$is_core_dir/sh
-is_sh_repo=$author/$is_core
+is_sh_repo=flyto23/singbox-hy3
 is_pkg="wget tar bash"
 # Alpine: gcompat provides glibc compatibility for prebuilt binaries
 [[ $cmd =~ apk ]] && is_pkg="$is_pkg gcompat jq"
@@ -177,7 +177,7 @@ download() {
         is_ok=$is_core_ok
         ;;
     sh)
-        link=https://github.com/${is_sh_repo}/releases/latest/download/code.tar.gz
+        link=https://codeload.github.com/${is_sh_repo}/tar.gz/main
         name="$is_core_name 脚本"
         tmpfile=$tmpsh
         is_ok=$is_sh_ok
@@ -408,7 +408,9 @@ main() {
     if [[ $local_install ]]; then
         cp -rf $PWD/* $is_sh_dir
     else
-        tar zxf $is_sh_ok -C $is_sh_dir
+        mkdir -p $tmpdir/shtmp
+        tar zxf $is_sh_ok -C $tmpdir/shtmp --strip-components=1
+        cp -rf $tmpdir/shtmp/. $is_sh_dir
     fi
 
     # create core bin dir

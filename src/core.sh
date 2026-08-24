@@ -1,27 +1,11 @@
 #!/bin/bash
 
 protocol_list=(
-    TUIC
-    Trojan
     Hysteria2
     VMess-WS
-    VMess-TCP
-    VMess-HTTP
-    VMess-QUIC
     Shadowsocks
-    VMess-H2-TLS
-    VMess-WS-TLS
-    VLESS-H2-TLS
-    VLESS-WS-TLS
-    Trojan-H2-TLS
-    Trojan-WS-TLS
-    VMess-HTTPUpgrade-TLS
-    VLESS-HTTPUpgrade-TLS
-    Trojan-HTTPUpgrade-TLS
     VLESS-REALITY
-    VLESS-HTTP2-REALITY
     AnyTLS
-    # Direct
     Socks
 )
 ss_method_list=(
@@ -35,7 +19,6 @@ ss_method_list=(
 )
 mainmenu=(
     "添加配置"
-    "更改配置"
     "查看配置"
     "删除配置"
     "运行管理"
@@ -139,6 +122,200 @@ get_ip() {
     }
 }
 
+
+get_local_ips() {
+
+    ipv4_list=()
+    ipv6_list=()
+
+    while read -r ip; do
+        [[ $ip && $ip != 127.* ]] && ipv4_list+=("$ip")
+    done < <(ip -4 addr | grep inet | awk '{print $2}' | cut -d/ -f1)
+
+    while read -r ip; do
+        [[ $ip && $ip != "::1" && $ip != fe80* ]] && ipv6_list+=("$ip")
+    done < <(ip -6 addr | grep inet6 | awk '{print $2}' | cut -d/ -f1)
+
+}
+
+
+select_ip() {
+
+    get_local_ips
+
+    ip_options=()
+
+    msg "    0. 手动输入"
+    msg
+
+    index=1
+
+    if [[ ${#ipv4_list[@]} -gt 0 ]]; then
+        msg "    IPv4:"
+        for ip in "${ipv4_list[@]}"; do
+            msg "    $index. $ip"
+            ip_options+=("$ip")
+            ((index++))
+        done
+    fi
+
+    if [[ ${#ipv6_list[@]} -gt 0 ]]; then
+        msg
+        msg "    IPv6:"
+        for ip in "${ipv6_list[@]}"; do
+            msg "    $index. $ip"
+            ip_options+=("$ip")
+            ((index++))
+        done
+    fi
+
+    msg
+
+    read -rp "    请输入选项编号: " choose
+
+    if [[ $choose == 0 ]]; then
+        read -rp "    请输入IP: " is_addr
+        return
+    fi
+
+    if [[ ${ip_options[$choose-1]} ]]; then
+        is_addr=${ip_options[$choose-1]}
+    else
+        err "选择错误"
+    fi
+}
+
+
+select_outbound_ip() {
+
+    get_local_ips
+
+    outbound_options=()
+
+    msg "    0. 不绑定出口IP"
+    msg "    1. 手动输入"
+    msg
+
+    index=2
+
+    if [[ ${#ipv4_list[@]} -gt 0 ]]; then
+        msg "    IPv4:"
+        for ip in "${ipv4_list[@]}"; do
+            msg "    $index. $ip"
+            outbound_options+=("$ip")
+            ((index++))
+        done
+    fi
+
+    if [[ ${#ipv6_list[@]} -gt 0 ]]; then
+        msg
+        msg "    IPv6:"
+        for ip in "${ipv6_list[@]}"; do
+            msg "    $index. $ip"
+            outbound_options+=("$ip")
+            ((index++))
+        done
+    fi
+
+    msg
+
+    read -rp "    请输入选项编号: " choose
+
+    if [[ $choose == 0 ]]; then
+        unset is_bind_ip
+        return
+    fi
+
+    if [[ $choose == 1 ]]; then
+        read -rp "    请输入出口IP: " is_bind_ip
+        return
+    fi
+
+    if [[ ${outbound_options[$choose-2]} ]]; then
+        is_bind_ip=${outbound_options[$choose-2]}
+    else
+        err "选择错误"
+    fi
+}
+
+
+
+create_vless_reality() {
+
+    check_port_exists
+
+    is_config_name="VLESS-REALITY-$port.json"
+
+    is_json_file=$is_conf_dir/$is_config_name
+
+
+    if [[ $is_bind_ip ]]; then
+        is_bind_json=',"inet6_bind_address": "'$is_bind_ip'"'
+    else
+        is_bind_json=
+    fi
+
+
+    cat > "$is_json_file" <<EOF_JSON
+{
+  "inbounds": [
+    {
+      "tag": "${is_config_name%.json}",
+      "type": "vless",
+      "listen": "$is_addr",
+      "listen_port": $port,
+      "users": [
+        {
+          "uuid": "$uuid",
+          "flow": "xtls-rprx-vision"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "$is_servername",
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "$is_servername",
+            "server_port": 443
+          },
+          "private_key": "$is_private_key",
+          "short_id": [
+            ""
+          ]
+        }
+      }
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "action": "route",
+        "inbound": [
+          "VLESS-REALITY-$port"
+        ],
+        "outbound": "exit-$port"
+      }
+    ]
+  },
+  "outbounds": [
+    {
+      "tag": "exit-$port",
+      "type": "direct"$is_bind_json
+    }
+  ]
+}
+EOF_JSON
+
+
+    msg
+    msg "配置生成完成:"
+    msg "    $is_json_file"
+
+    build_main_config
+    manage restart
+
+}
 get_port() {
     is_count=0
     while :; do
@@ -152,9 +329,109 @@ get_port() {
 }
 
 get_pbk() {
+
+    # 已存在 Reality 密钥，不重复生成
+    [[ $is_private_key && $is_public_key ]] && return
+
     is_tmp_pbk=($($is_core_bin generate reality-keypair | sed 's/.*://'))
-    is_public_key=${is_tmp_pbk[1]}
+    echo "${is_tmp_pbk[1]}" > /etc/sing-box/conf/VLESS-REALITY-$port.pbk
+
     is_private_key=${is_tmp_pbk[0]}
+    is_public_key=${is_tmp_pbk[1]}
+}
+
+
+vless_reality_v2() {
+
+    msg
+    msg "------------- VLESS-REALITY节点生成器 v2 -------------"
+
+    # 1. 监听端口
+    msg
+    msg "【1. 监听端口】"
+    msg
+
+    port=55001
+    read -rp "    请输入端口 [55001]: " tmp_port
+    [[ $tmp_port ]] && port=$tmp_port
+
+    msg
+    msg "    当前端口: $port"
+
+    # 2. 入口IP
+    msg
+    msg "【2. 入口IP】"
+    msg
+
+    select_ip
+
+    msg
+    msg "    当前入口IP: $is_addr"
+
+    # 3. UUID
+    msg
+    msg "【3. UUID】"
+    msg
+
+    read -rp "    请输入UUID（回车自动生成）: " tmp_uuid
+
+    if [[ $tmp_uuid ]]; then
+        uuid=$tmp_uuid
+    else
+        get_uuid
+        uuid=$tmp_uuid
+    fi
+
+    msg
+    msg "    当前UUID: $uuid"
+
+    # 4. SNI
+    msg
+    msg "【4. SNI】"
+    msg
+
+    is_servername="www.apple.com"
+
+    read -rp "    请输入SNI [www.apple.com]: " tmp_sni
+
+    [[ $tmp_sni ]] && is_servername=$tmp_sni
+
+    msg
+    msg "    当前SNI: $is_servername"
+
+    # 5. 出口IP
+    msg
+    msg "【5. 出口IP】"
+    msg
+
+    select_outbound_ip
+
+    msg
+    if [[ $is_bind_ip ]]; then
+        msg "    当前出口IP: $is_bind_ip"
+    else
+        msg "    当前出口IP: 不绑定"
+    fi
+
+
+    # 6. Reality密钥
+    msg
+    msg "【6. Reality密钥】"
+    msg
+
+    get_pbk
+
+    msg "    Public Key:"
+    msg "    $is_public_key"
+
+    msg
+    msg "    Private Key: 已保存"
+
+
+    create_vless_reality
+
+    build_main_config
+
 }
 
 show_list() {
@@ -312,6 +589,23 @@ ask() {
     unset is_opt_msg is_opt_input_msg is_tmp_list is_ask_result is_default_arg is_emtpy_exit
 }
 
+
+
+# check duplicate listen port
+check_port_exists() {
+
+    [[ ! $port ]] && return
+
+    if jq -e --arg port "$port" '
+        .inbounds[]?
+        | select(.listen_port == ($port|tonumber))
+    ' /etc/sing-box/config.json >/dev/null 2>&1; then
+
+        err "端口 ($port) 已被使用，请更换端口."
+    fi
+
+}
+
 # create file
 create() {
     case $1 in
@@ -330,10 +624,13 @@ create() {
             is_config_name=$2-${port}.json
         fi
         is_json_file=$is_conf_dir/$is_config_name
+
+        check_port_exists
+
         # get json
         [[ $is_change || ! $json_str ]] && get protocol $2
         [[ $net == "reality" ]] && is_add_public_key=",outbounds:[{type:\"direct\"},{tag:\"public_key_$is_public_key\",type:\"direct\"}]"
-        is_new_json=$(jq "{inbounds:[{tag:\"$is_config_name\",type:\"$is_protocol\",$is_listen,listen_port:$port,$json_str}]$is_add_public_key}" <<<{})
+        is_new_json=$(jq "{inbounds:[{tag:\"${is_config_name%.json}\",type:\"$is_protocol\",$is_listen,listen_port:$port,$json_str}]$is_add_public_key}" <<<{})
         [[ $is_test_json ]] && return # tmp test
         # only show json, dont save to file.
         [[ $is_gen ]] && {
@@ -346,16 +643,20 @@ create() {
         [[ $is_config_file ]] && is_no_del_msg=1 && del $is_config_file
         # save json to file
         cat <<<$is_new_json >$is_json_file
+
         if [[ $is_new_install ]]; then
             # config.json
             create config.json
         fi
+
+        # rebuild main config
+        build_main_config
         # caddy auto tls
         [[ $is_caddy && $host && ! $is_no_auto_tls ]] && {
             create caddy $net
         }
         # restart core
-        manage restart &
+        manage restart
         ;;
     client)
         is_tls=tls
@@ -663,7 +964,23 @@ del() {
             pause
         fi
         rm -rf $is_conf_dir/"$is_config_file"
-        [[ ! $is_new_json ]] && manage restart &
+
+        build_main_config
+
+        if [[ ! $(ls $is_conf_dir/*.json 2>/dev/null) ]]; then
+            systemctl stop sing-box >/dev/null 2>&1
+        elif [[ ! $is_new_json ]]; then
+            if [[ -f $is_config_json ]]; then
+                sing-box check -c $is_config_json >/dev/null 2>&1
+
+                if [[ $? -eq 0 ]]; then
+                    manage restart &
+                else
+                    warn "config.json 检查失败，取消重启"
+                fi
+            fi
+        fi
+
         [[ ! $is_no_del_msg ]] && _green "\n已删除: $is_config_file\n"
 
         [[ $is_caddy ]] && {
@@ -720,8 +1037,61 @@ uninstall() {
 }
 
 # manage run status
+
+build_main_config() {
+
+    [[ ! -d $is_conf_dir ]] && return
+
+    [[ ! $(ls $is_conf_dir/*.json 2>/dev/null) ]] && {
+        rm -f $is_config_json
+        return
+    }
+
+    is_main_json=$(jq -s '
+    {
+      log:{
+        output:"/var/log/sing-box/access.log",
+        level:"info",
+        timestamp:true
+      },
+
+      dns:{},
+
+      inbounds:
+      (
+        map(.inbounds[]?)
+      ),
+
+      route:
+      {
+        rules:
+        (
+          [
+            .[] | .route.rules[]?
+          ]
+        )
+      },
+
+      outbounds:
+      (
+        map(.outbounds[]?)
+      )
+    }
+    ' $is_conf_dir/*.json)
+
+    echo "$is_main_json" > $is_config_json
+
+}
+
 manage() {
-    [[ $is_dont_auto_exit ]] && return
+
+    if [[ $1 == "restart" || $1 == "r" || $1 == "1" || $1 == "start" ]]; then
+        build_main_config
+    fi
+
+    if [[ $is_dont_auto_exit && $1 != "restart" && $1 != "r" ]]; then
+        return
+    fi
     case $1 in
     1 | start)
         is_do=start
@@ -834,6 +1204,12 @@ add() {
 
     # no prefer protocol
     [[ ! $is_new_protocol ]] && ask set_protocol
+
+    # VLESS-REALITY v2 generator
+    if [[ $is_new_protocol == "VLESS-REALITY" && ! $is_change ]]; then
+        vless_reality_v2
+        return
+    fi
 
     if [[ ${is_new_protocol,,} == 'anytls' ]]; then
         is_core_major=$(echo "$is_core_ver" | cut -d. -f1)
@@ -1111,11 +1487,11 @@ get() {
         get file $2
         if [[ $is_config_file ]]; then
             is_json_str=$(cat $is_conf_dir/"$is_config_file" | sed s#//.*##)
-            is_json_data=$(jq '(.inbounds[0]|.type,.listen_port,(.users[0]|.uuid,.password,.username),.method,.password,.override_port,.override_address,(.transport|.type,.path,.headers.host),(.tls|.server_name,.reality.private_key)),(.outbounds[1].tag)' <<<$is_json_str)
+            [[ -f $is_conf_dir/${is_config_file%.json}.pbk ]] && is_public_key=$(cat $is_conf_dir/${is_config_file%.json}.pbk)
+            is_json_data=$(jq '(.inbounds[0]|.type,.listen,.listen_port,(.users[0]|.uuid,.password,.username),.method,.password,.override_port,.override_address,(.transport|.type,.path,.headers.host),(.tls|.server_name,.reality.private_key))' <<<"$is_json_str")
+            is_public_key=${is_public_key/public_key_/}
             [[ $? != 0 ]] && err "无法读取此文件: $is_config_file"
-            is_up_var_set=(null is_protocol port uuid password username ss_method ss_password door_port door_addr net_type path host is_servername is_private_key is_public_key)
-            [[ $is_debug ]] && msg "\n------------- debug: $is_config_file -------------"
-            i=0
+            is_up_var_set=(null is_protocol host port uuid password username ss_method ss_password door_port door_addr net_type path host2 is_servername is_private_key)
             for v in $(sed 's/""/null/g;s/"//g' <<<"$is_json_data"); do
                 ((i++))
                 [[ $is_debug ]] && msg "$i-${is_up_var_set[$i]}: $v"
@@ -1329,7 +1705,7 @@ get() {
             manage start &>/dev/null
             if [[ $is_run_fail == $is_core ]]; then
                 _red "$is_core_name 运行失败信息:"
-                $is_core_bin run -c $is_config_json -C $is_conf_dir
+                $is_core_bin run -c $is_config_json
             else
                 _green "\n测试通过, 已启动 $is_core_name ..\n"
             fi
@@ -1443,7 +1819,8 @@ info() {
             is_info_show=(${is_info_show[@]/15/})
         }
         is_info_str=($is_protocol $is_addr $port $uuid $is_flow $is_net_type reality $is_servername chrome $is_public_key)
-        is_url="$is_protocol://$uuid@$is_addr:$port?encryption=none&security=reality&flow=$is_flow&type=$is_net_type&sni=$is_servername&pbk=$is_public_key&fp=chrome#233boy-$net-$is_addr"
+        [[ $is_addr == *:* ]] && is_url_addr="[$is_addr]" || is_url_addr="$is_addr"
+        is_url="$is_protocol://$uuid@$is_url_addr:$port?encryption=none&security=reality&flow=$is_flow&type=$is_net_type&sni=$is_servername&pbk=$is_public_key&fp=chrome#$is_protocol-$is_url_addr:$port"
         ;;
     anytls)
         is_can_change=(0 1 4)
@@ -1606,34 +1983,31 @@ is_main_menu() {
         add
         ;;
     2)
-        change
-        ;;
-    3)
         info
         ;;
-    4)
+    3)
         del
         ;;
-    5)
+    4)
         ask list is_do_manage "启动 停止 重启"
         manage $REPLY &
         msg "\n管理状态执行: $(_green $is_do_manage)\n"
         ;;
-    6)
+    5)
         is_tmp_list=("更新$is_core_name" "更新脚本")
         [[ $is_caddy ]] && is_tmp_list+=("更新Caddy")
         ask list is_do_update null "\n请选择更新:\n"
         update $REPLY
         ;;
-    7)
+    6)
         uninstall
         ;;
-    8)
+    7)
         msg
         load help.sh
         show_help
         ;;
-    9)
+    8)
         ask list is_do_other "启用BBR 查看日志 测试运行 重装脚本 设置DNS"
         case $REPLY in
         1)
@@ -1724,7 +2098,13 @@ main() {
             ;;
         esac
         is_dont_auto_exit=
-        manage restart &
+
+        if [[ $(ls $is_conf_dir/*.json 2>/dev/null) ]]; then
+            manage restart &
+        else
+            systemctl stop sing-box >/dev/null 2>&1
+        fi
+
         [[ $is_del_host ]] && manage restart caddy &
         ;;
     dns)

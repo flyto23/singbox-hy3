@@ -354,7 +354,7 @@ create() {
             is_add_public_key=",outbounds:[{tag:\"direct_$port\",type:\"direct\"${is_bind_json}},{tag:\"public_key_$is_public_key\",type:\"direct\"${is_bind_json}}]"
             is_inbound_outbound=",outbound:\"direct_$port\""
         } || is_inbound_outbound=
-        is_new_json=$(jq "{inbounds:[{tag:\"$is_config_name\",type:\"$is_protocol\",$is_listen,listen_port:$port$is_inbound_outbound$json_str}]$is_add_public_key}" <<<{})
+        is_new_json=$(jq "{inbounds:[{tag:\"$is_config_name\",type:\"$is_protocol\",$is_listen,listen_port:$port$is_inbound_outbound,$json_str}]$is_add_public_key}" <<<{})
         [[ $is_test_json ]] && return # tmp test
         # only show json, dont save to file.
         [[ $is_gen ]] && {

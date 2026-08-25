@@ -719,17 +719,9 @@ change() {
             }
             [[ $(type -P hostname) ]] && is_local_ips+=($(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^127\.0\.0\.1$'))
             [[ ${#is_local_ips[@]} -gt 0 ]] && is_local_ips=($(printf '%s\n' "${is_local_ips[@]}" | awk '!seen[$0]++'))
-            is_tmp_list=("手动输入其他 IP" "清除绑定 (clear)")
-            [[ ${#is_local_ips[@]} -gt 0 ]] && is_tmp_list=("${is_local_ips[@]}" "${is_tmp_list[@]}")
+            [[ ${#is_local_ips[@]} -eq 0 ]] && err "未找到本机可用出口 IP."
+            is_tmp_list=("${is_local_ips[@]}")
             ask list is_new_bind_ip "" "\n请选择出口 IP (本机可用地址):\n" "请选择序号 [1-${#is_tmp_list[@]}]:"
-            case "$is_new_bind_ip" in
-                "手动输入其他 IP")
-                    ask string is_new_bind_ip "请输入新的出口 IP (支持 IPv4 / IPv6):"
-                    ;;
-                "清除绑定 (clear)")
-                    is_new_bind_ip=clear
-                    ;;
-            esac
         }
         if [[ $is_new_bind_ip =~ ^(clear|none|off|del|delete|清空|清除|删除|无|空)$ ]]; then
             is_new_bind_ip=

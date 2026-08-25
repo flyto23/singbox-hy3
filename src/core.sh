@@ -41,9 +41,7 @@ mainmenu=(
     "运行管理"
     "更新"
     "卸载"
-    "帮助"
     "其他"
-    "关于"
 )
 info_list=(
     "协议 (protocol)"
@@ -69,7 +67,6 @@ info_list=(
     "跳过证书验证 (allowInsecure)"
     "拥塞控制算法 (congestion_control)"
     "出口IP (bind address)"
-    "出口网卡 (bind interface)"
 )
 change_list=(
     "更改协议"
@@ -86,7 +83,6 @@ change_list=(
     "更改伪装网站"
     "更改用户名 (Username)"
     "更改出口IP (bind address)"
-    "更改出口网卡 (bind interface)"
 )
 servername_list=(
     www.amazon.com
@@ -174,7 +170,6 @@ set_bind_json() {
         fi
     }
     is_bind_json="$is_bind_json_addr"
-    [[ $is_bind_iface ]] && is_bind_json=",bind_interface:\"$is_bind_iface\"$is_bind_json_addr"
 }
 
 # validate IPv4 / IPv6 address format (loose check)
@@ -504,9 +499,6 @@ change() {
         bind | bindip | bind-ip)
             is_change_id=13
             ;;
-        iface | interface)
-            is_change_id=14
-            ;;
         *)
             [[ $is_try_change ]] && return
             err "无法识别 ($2) 更改类型."
@@ -719,24 +711,31 @@ change() {
         # new bind ip (outbound ip, support ipv4/ipv6)
         is_new_bind_ip=$3
         [[ ! $is_reality ]] && err "($is_config_file) 不支持更改出口 IP."
-        [[ ! $is_new_bind_ip ]] && ask string is_new_bind_ip "请输入新的出口 IP (支持 IPv4 / IPv6, 输入 clear 清除):"
+        [[ ! $is_new_bind_ip ]] && {
+            is_local_ips=()
+            [[ $(type -P ip) ]] && {
+                is_local_ips+=($(ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -v '^127\.0\.0\.1$'))
+                is_local_ips+=($(ip -o -6 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -vE '^(fe80|::1|::)'))
+            }
+            [[ $(type -P hostname) ]] && is_local_ips+=($(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^127\.0\.0\.1$'))
+            is_tmp_list=("手动输入其他 IP" "清除绑定 (clear)")
+            [[ ${#is_local_ips[@]} -gt 0 ]] && is_tmp_list=("${is_local_ips[@]}" "${is_tmp_list[@]}")
+            ask list is_new_bind_ip "" "\n请选择出口 IP (本机可用地址):\n" "请选择序号 [1-${#is_tmp_list[@]}]:"
+            case "$is_new_bind_ip" in
+                "手动输入其他 IP")
+                    ask string is_new_bind_ip "请输入新的出口 IP (支持 IPv4 / IPv6):"
+                    ;;
+                "清除绑定 (clear)")
+                    is_new_bind_ip=clear
+                    ;;
+            esac
+        }
         if [[ $is_new_bind_ip =~ ^(clear|none|off|del|delete|清空|清除|删除|无|空)$ ]]; then
             is_new_bind_ip=
         elif [[ $is_new_bind_ip ]]; then
             validate_ip "$is_new_bind_ip" || err "($is_new_bind_ip) 不是有效的 IPv4 / IPv6 地址."
         fi
         is_bind_ip=$is_new_bind_ip
-        add $net
-        ;;
-    14)
-        # new bind interface
-        is_new_bind_iface=$3
-        [[ ! $is_reality ]] && err "($is_config_file) 不支持更改出口网卡."
-        [[ ! $is_new_bind_iface ]] && ask string is_new_bind_iface "请输入新的出口网卡 (例如 eth0, 输入 clear 清除):"
-        if [[ $is_new_bind_iface =~ ^(clear|none|off|del|delete|清空|清除|删除|无|空)$ ]]; then
-            is_new_bind_iface=
-        fi
-        is_bind_iface=$is_new_bind_iface
         add $net
         ;;
     esac
@@ -960,8 +959,7 @@ add() {
         is_use_uuid=$3
         is_use_servername=$4
         is_use_bind=$5
-        is_use_bind_iface=$6
-        is_add_opts="[port] [uuid] [sni] [bind_ip] [bind_iface]"
+        is_add_opts="[port] [uuid] [sni] [bind_ip]"
         ;;
     shadowsocks)
         is_use_port=$2
@@ -1079,7 +1077,6 @@ add() {
             [[ $is_use_bind ]] && validate_ip "$is_use_bind" || err "($is_use_bind) 不是有效的 IPv4 / IPv6 地址."
             is_bind_ip=$is_use_bind
         }
-        [[ $is_use_bind_iface ]] && is_bind_iface=$is_use_bind_iface
         [[ $is_use_socks_user ]] && is_socks_user=$is_use_socks_user
         [[ $is_use_socks_pass ]] && is_socks_pass=$is_use_socks_pass
     fi
@@ -1537,17 +1534,17 @@ info() {
         ;;
     reality)
         is_color=41
-        is_can_change=(0 1 5 9 10 13 14)
+        is_can_change=(0 1 5 9 10 13)
         is_flow=xtls-rprx-vision
         is_net_type=tcp
         if [[ $net_type =~ "http" || ${is_new_protocol,,} =~ "http" ]]; then
             is_flow=
             is_net_type=h2
-            is_info_show=(0 1 2 3 4 8 16 17 18 22 23)
-            is_info_str=($is_protocol $is_addr $port $uuid $is_net_type reality $is_servername chrome $is_public_key $is_bind_ip $is_bind_iface)
+            is_info_show=(0 1 2 3 4 8 16 17 18 22)
+            is_info_str=($is_protocol $is_addr $port $uuid $is_net_type reality $is_servername chrome $is_public_key $is_bind_ip)
         else
-            is_info_show=(0 1 2 3 15 4 8 16 17 18 22 23)
-            is_info_str=($is_protocol $is_addr $port $uuid $is_flow $is_net_type reality $is_servername chrome $is_public_key $is_bind_ip $is_bind_iface)
+            is_info_show=(0 1 2 3 15 4 8 16 17 18 22)
+            is_info_str=($is_protocol $is_addr $port $uuid $is_flow $is_net_type reality $is_servername chrome $is_public_key $is_bind_ip)
         fi
         is_url="$is_protocol://$uuid@$is_addr:$port?encryption=none&security=reality&flow=$is_flow&type=$is_net_type&sni=$is_servername&pbk=$is_public_key&fp=chrome#$net-$is_addr"
         ;;
@@ -1613,9 +1610,6 @@ footer_msg() {
     ####### 要点13脸吗只会改我链接的小人 #######
     unset c n m s b
     msg "------------- END -------------"
-    msg "关注(tg): $(msg_ul https://t.me/tg2333)"
-    msg "文档(doc): $(msg_ul https://233boy.com/$is_core/$is_core-script/)"
-    msg "推广(ads): 机场推荐($is_core_name services): $(msg_ul https://g${c}e${n}t${m}j${s}m${b}s.com/)\n"
     ####### 要点13脸吗只会改我链接的小人 #######
 }
 
@@ -1702,9 +1696,8 @@ update() {
 
 # main menu; if no prefer args.
 is_main_menu() {
-    msg "\n------------- $is_core_name script $is_sh_ver by $author -------------"
+    msg "\n------------- $is_core_name script $is_sh_ver -------------"
     msg "$is_core_name $is_core_ver: $is_core_status"
-    msg "群组(Chat): $(msg_ul https://t.me/tg233boy)"
     is_main_start=1
     ask mainmenu
     case $REPLY in
@@ -1735,11 +1728,6 @@ is_main_menu() {
         uninstall
         ;;
     8)
-        msg
-        load help.sh
-        show_help
-        ;;
-    9)
         ask list is_do_other "启用BBR 查看日志 测试运行 重装脚本 设置DNS"
         case $REPLY in
         1)
@@ -1761,10 +1749,6 @@ is_main_menu() {
             dns_set
             ;;
         esac
-        ;;
-    10)
-        load help.sh
-        about
         ;;
     esac
 }
@@ -1913,10 +1897,6 @@ main() {
         [[ $is_caddy_ver ]] && is_caddy_ver="/ $(_blue Caddy $is_caddy_ver)"
         msg "\n$(_green $is_core_name $is_core_ver) / $(_cyan $is_core_name script $is_sh_ver) $is_caddy_ver\n"
         ;;
-    h | help | --help)
-        load help.sh
-        show_help ${@:2}
-        ;;
     *)
         is_try_change=1
         change test $1
@@ -1928,7 +1908,7 @@ main() {
                 change
             }
         else
-            err "无法识别 ($1), 获取帮助请使用: $is_core help"
+            err "无法识别 ($1), 请使用: $is_core"
         fi
         ;;
     esac

@@ -718,6 +718,7 @@ change() {
                 is_local_ips+=($(ip -o -6 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -vE '^(fe80|::1|::)'))
             }
             [[ $(type -P hostname) ]] && is_local_ips+=($(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^127\.0\.0\.1$'))
+            [[ ${#is_local_ips[@]} -gt 0 ]] && is_local_ips=($(printf '%s\n' "${is_local_ips[@]}" | awk '!seen[$0]++'))
             is_tmp_list=("手动输入其他 IP" "清除绑定 (clear)")
             [[ ${#is_local_ips[@]} -gt 0 ]] && is_tmp_list=("${is_local_ips[@]}" "${is_tmp_list[@]}")
             ask list is_new_bind_ip "" "\n请选择出口 IP (本机可用地址):\n" "请选择序号 [1-${#is_tmp_list[@]}]:"

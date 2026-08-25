@@ -187,11 +187,13 @@ validate_ip() {
     return 1
 }
 
-# rebuild route.json so each reality inbound uses its own bound direct outbound.
-# sing-box merges config files with arrays replaced (not appended), so all
-# per-node route rules must live in a single file to accumulate correctly.
+# rebuild route rules into the MAIN config.json.
+# sing-box merges the -C directory for inbounds/outbounds only, NOT route blocks,
+# so the route rules must live in the main config.json. Each reality inbound is
+# routed to its own bound direct outbound (direct_<port>).
 build_route_json() {
     [[ ! -d $is_conf_dir ]] && return
+    [[ ! -f $is_config_json ]] && return
     is_route_rules=
     for f in "$is_conf_dir"/*.json; do
         [[ -f "$f" ]] || continue
@@ -203,10 +205,10 @@ build_route_json() {
         }
     done
     if [[ $is_route_rules ]]; then
-        is_route_json=$(jq -n "{route:{rules:[${is_route_rules#,}],final:\"direct\"}}")
-        cat <<<$is_route_json >"$is_conf_dir/route.json"
+        is_route_json=$(jq -n "{rules:[${is_route_rules#,}],final:\"direct\"}")
+        jq --argjson r "$is_route_json" '.route = $r' "$is_config_json" >"$is_config_json.tmp" && mv "$is_config_json.tmp" "$is_config_json"
     else
-        rm -f "$is_conf_dir/route.json"
+        jq 'del(.route)' "$is_config_json" >"$is_config_json.tmp" && mv "$is_config_json.tmp" "$is_config_json"
     fi
 }
 
@@ -406,6 +408,7 @@ create() {
         if [[ $is_new_install ]]; then
             # config.json
             create config.json
+            build_route_json
         fi
         # caddy auto tls
         [[ $is_caddy && $host && ! $is_no_auto_tls ]] && {
@@ -1818,6 +1821,7 @@ main() {
         ;;
     fix-config.json)
         create config.json
+        build_route_json
         ;;
     fix-caddyfile)
         if [[ $is_caddy ]]; then

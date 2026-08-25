@@ -165,13 +165,31 @@ get_pbk() {
 # bind_interface is only added when an interface is explicitly set
 set_bind_json() {
     is_bind_json=
-    [[ ! $is_bind_ip ]] && return
-    if [[ $is_bind_ip =~ : ]]; then
-        is_bind_json=",inet6_bind_address:\"$is_bind_ip\""
-    else
-        is_bind_json=",inet4_bind_address:\"$is_bind_ip\""
+    is_bind_json_addr=
+    [[ $is_bind_ip ]] && {
+        if [[ $is_bind_ip =~ : ]]; then
+            is_bind_json_addr=",inet6_bind_address:\"$is_bind_ip\""
+        else
+            is_bind_json_addr=",inet4_bind_address:\"$is_bind_ip\""
+        fi
+    }
+    is_bind_json="$is_bind_json_addr"
+    [[ $is_bind_iface ]] && is_bind_json=",bind_interface:\"$is_bind_iface\"$is_bind_json_addr"
+}
+
+# validate IPv4 / IPv6 address format (loose check)
+validate_ip() {
+    local ip=$1 o
+    # IPv4
+    if [[ $ip =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        for o in ${ip//./ }; do
+            [[ 10#$o -gt 255 ]] && return 1
+        done
+        return 0
     fi
-    [[ $is_bind_iface ]] && is_bind_json=",bind_interface:\"$is_bind_iface\"$is_bind_json"
+    # IPv6 (loose: at least one colon, only hex digits and colons)
+    [[ $ip == *:* && $ip =~ ^[0-9A-Fa-f:]+$ ]] && return 0
+    return 1
 }
 
 # rebuild route.json so each reality inbound uses its own bound direct outbound.
@@ -375,7 +393,7 @@ create() {
         [[ $net == "reality" ]] && {
             set_bind_json
             is_add_public_key=",outbounds:[{tag:\"direct_$port\",type:\"direct\"${is_bind_json}},{tag:\"public_key_$is_public_key\",type:\"direct\"${is_bind_json}}]"
-        }
+        } || is_add_public_key=
         is_new_json=$(jq "{inbounds:[{tag:\"$is_config_name\",type:\"$is_protocol\",$is_listen,listen_port:$port,$json_str}]$is_add_public_key}" <<<{})
         [[ $is_test_json ]] && return # tmp test
         # only show json, dont save to file.
@@ -701,7 +719,12 @@ change() {
         # new bind ip (outbound ip, support ipv4/ipv6)
         is_new_bind_ip=$3
         [[ ! $is_reality ]] && err "($is_config_file) 不支持更改出口 IP."
-        [[ ! $is_new_bind_ip ]] && ask string is_new_bind_ip "请输入新的出口 IP (支持 IPv4 / IPv6):"
+        [[ ! $is_new_bind_ip ]] && ask string is_new_bind_ip "请输入新的出口 IP (支持 IPv4 / IPv6, 输入 clear 清除):"
+        if [[ $is_new_bind_ip =~ ^(clear|none|off|del|delete|清空|清除|删除|无|空)$ ]]; then
+            is_new_bind_ip=
+        elif [[ $is_new_bind_ip ]]; then
+            validate_ip "$is_new_bind_ip" || err "($is_new_bind_ip) 不是有效的 IPv4 / IPv6 地址."
+        fi
         is_bind_ip=$is_new_bind_ip
         add $net
         ;;
@@ -709,7 +732,10 @@ change() {
         # new bind interface
         is_new_bind_iface=$3
         [[ ! $is_reality ]] && err "($is_config_file) 不支持更改出口网卡."
-        [[ ! $is_new_bind_iface ]] && ask string is_new_bind_iface "请输入新的出口网卡 (例如 eth0):"
+        [[ ! $is_new_bind_iface ]] && ask string is_new_bind_iface "请输入新的出口网卡 (例如 eth0, 输入 clear 清除):"
+        if [[ $is_new_bind_iface =~ ^(clear|none|off|del|delete|清空|清除|删除|无|空)$ ]]; then
+            is_new_bind_iface=
+        fi
         is_bind_iface=$is_new_bind_iface
         add $net
         ;;
@@ -1048,7 +1074,11 @@ add() {
         [[ $is_use_host ]] && host=$is_use_host
         [[ $is_use_door_addr ]] && door_addr=$is_use_door_addr
         [[ $is_use_servername ]] && is_servername=$is_use_servername
-        [[ $is_use_bind ]] && is_bind_ip=$is_use_bind
+        [[ $is_use_bind ]] && {
+            [[ $is_use_bind == clear ]] && is_use_bind=
+            [[ $is_use_bind ]] && validate_ip "$is_use_bind" || err "($is_use_bind) 不是有效的 IPv4 / IPv6 地址."
+            is_bind_ip=$is_use_bind
+        }
         [[ $is_use_bind_iface ]] && is_bind_iface=$is_use_bind_iface
         [[ $is_use_socks_user ]] && is_socks_user=$is_use_socks_user
         [[ $is_use_socks_pass ]] && is_socks_pass=$is_use_socks_pass

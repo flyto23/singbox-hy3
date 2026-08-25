@@ -1779,6 +1779,12 @@ main() {
     dd | ddel | fix | fix-all)
         case $1 in
         fix)
+            [[ $2 == config.json || $2 == config ]] && {
+                create config.json
+                build_route_json
+                manage restart &
+                return
+            }
             [[ $2 ]] && {
                 change $2 full
             } || {
@@ -1822,6 +1828,7 @@ main() {
     fix-config.json)
         create config.json
         build_route_json
+        manage restart &
         ;;
     fix-caddyfile)
         if [[ $is_caddy ]]; then

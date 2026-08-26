@@ -635,24 +635,6 @@ change() {
         }
         add $net
         ;;
-    11)
-        # new proxy site
-        is_new_proxy_site=$3
-        [[ ! $is_caddy && ! $host ]] && {
-            err "($is_config_file) 不支持更改伪装网站."
-        }
-        [[ ! -f $is_caddy_conf/${host}.conf.add ]] && err "无法配置伪装网站."
-        [[ ! $is_new_proxy_site ]] && ask string is_new_proxy_site "请输入新的伪装网站 (例如 example.com):"
-        proxy_site=$(sed 's#^.*//##;s#/$##' <<<$is_new_proxy_site)
-        [[ $(grep -i "^233boy.com$" <<<$proxy_site) ]] && {
-            err "你干嘛～哎呦～"
-        } || {
-            load caddy.sh
-            caddy_config proxy
-            manage restart caddy &
-        }
-        msg "\n已更新伪装网站为: $(_green $proxy_site) \n"
-        ;;
     12)
         # new socks user
         [[ ! $is_socks_user ]] && err "($is_config_file) 不支持更改用户名 (Username)."
@@ -1580,38 +1562,6 @@ footer_msg() {
     unset c n m s b
     msg "------------- END -------------"
     ####### 要点13脸吗只会改我链接的小人 #######
-}
-
-# URL or qrcode
-url_qr() {
-    is_dont_show_info=1
-    info $2
-    if [[ $is_url ]]; then
-        [[ $1 == 'url' ]] && {
-            msg "\n------------- $is_config_name & URL 链接 -------------"
-            msg "\n\e[${is_color}m${is_url}\e[0m\n"
-            footer_msg
-        } || {
-            link="https://233boy.github.io/tools/qr.html#${is_url}"
-            msg "\n------------- $is_config_name & QR code 二维码 -------------"
-            msg
-            if [[ $(type -P qrencode) ]]; then
-                qrencode -t ANSI "${is_url}"
-            else
-                msg "请安装 qrencode: $(_green "$cmd update -y; $cmd install qrencode -y")"
-            fi
-            msg
-            msg "如果无法正常显示或识别, 请使用下面的链接来生成二维码:"
-            msg "\n\e[4;${is_color}m${link}\e[0m\n"
-            footer_msg
-        }
-    else
-        [[ $1 == 'url' ]] && {
-            err "($is_config_name) 无法生成 URL 链接."
-        } || {
-            err "($is_config_name) 无法生成 QR code 二维码."
-        }
-    fi
 }
 
 # update core, sh, caddy

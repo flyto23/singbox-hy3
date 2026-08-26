@@ -67,6 +67,7 @@ info_list=(
     "跳过证书验证 (allowInsecure)"
     "拥塞控制算法 (congestion_control)"
     "出口IP (bind address)"
+    "进口IP (listen)"
 )
 change_list=(
     "更改协议"
@@ -82,7 +83,7 @@ change_list=(
     "更改 SNI (serverName)"
     "更改伪装网站"
     "更改用户名 (Username)"
-    "更改出口IP (bind address)"
+    "更改端口/进口IP/出口IP"
 )
 servername_list=(
     www.amazon.com
@@ -373,8 +374,6 @@ create() {
     server)
         is_tls=none
         get new
-        # listen
-        is_listen='listen: "::"'
         # file name
         if [[ $host ]]; then
             is_config_name=$2-${host}.json
@@ -383,6 +382,8 @@ create() {
             is_config_name=$2-${is_anytls_domain}.json
         else
             is_config_name=$2-${port}.json
+            is_listen='listen: "::"'
+            [[ $is_listen_ip ]] && is_listen="listen: \"$is_listen_ip\""
         fi
         is_json_file=$is_conf_dir/$is_config_name
         # get json
@@ -459,56 +460,8 @@ change() {
     is_change=1
     is_dont_show_info=1
     if [[ $2 ]]; then
-        case ${2,,} in
-        full)
-            is_change_id=full
-            ;;
-        new)
-            is_change_id=0
-            ;;
-        port)
-            is_change_id=1
-            ;;
-        host)
-            is_change_id=2
-            ;;
-        path)
-            is_change_id=3
-            ;;
-        pass | passwd | password)
-            is_change_id=4
-            ;;
-        id | uuid)
-            is_change_id=5
-            ;;
-        ssm | method | ss-method | ss_method)
-            is_change_id=6
-            ;;
-        dda | door-addr | door_addr)
-            is_change_id=7
-            ;;
-        ddp | door-port | door_port)
-            is_change_id=8
-            ;;
-        key | publickey | privatekey)
-            is_change_id=9
-            ;;
-        sni | servername | servernames)
-            is_change_id=10
-            ;;
-        web | proxy-site)
-            is_change_id=11
-            ;;
-        bind | bindip | bind-ip)
-            is_change_id=13
-            ;;
-        *)
-            [[ $is_try_change ]] && return
-            err "无法识别 ($2) 更改类型."
-            ;;
-        esac
+        err "不支持命令行参数, 请直接在菜单中选择操作."
     fi
-    [[ $is_try_change ]] && return
     [[ $is_dont_auto_exit ]] && {
         get info $1
     } || {
@@ -527,7 +480,6 @@ change() {
     [[ $host ]] && net=$is_protocol-$net-tls
     [[ $is_reality && $net_type =~ 'http' ]] && net=rh2
 
-    [[ $3 == 'auto' ]] && is_auto=1
     # if is_dont_show_info exist, cant show info.
     is_dont_show_info=
     # if not prefer args, show change list and then get change id.
@@ -536,9 +488,6 @@ change() {
         is_change_id=${is_can_change[$REPLY - 1]}
     }
     case $is_change_id in
-    full)
-        add $net ${@:3}
-        ;;
     0)
         # new protocol
         is_set_new_protocol=1
@@ -711,24 +660,52 @@ change() {
         add $net
         ;;
     13)
-        # new bind ip (outbound ip, support ipv4/ipv6)
-        is_new_bind_ip=$3
-        [[ ! $is_reality ]] && err "($is_config_file) 不支持更改出口 IP."
-        [[ ! $is_new_bind_ip ]] && {
-            is_local_ips=()
-            [[ $(type -P ip) ]] && {
-                is_local_ips+=($(ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -v '^127\.0\.0\.1$'))
-                is_local_ips+=($(ip -o -6 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -vE '^(fe80|::1|::)'))
+        # 更改端口 / 进口IP / 出口IP (combined network settings)
+        [[ ! $is_reality ]] && err "($is_config_file) 不支持此更改."
+        # 1) 新端口
+        is_new_port=$3
+        if [[ $is_new_port && ! $is_auto ]]; then
+            [[ ! $(is_test port $is_new_port) ]] && err "请输入正确的端口, 可选(1-65535)"
+            [[ $is_new_port != 443 && $is_new_port != $port && $(is_test port_used $is_new_port) ]] && err "无法使用 ($is_new_port) 端口"
+        fi
+        [[ ! $is_new_port ]] && {
+            [[ $is_auto ]] && get_port && is_new_port=$tmp_port
+            [[ ! $is_new_port ]] && {
+                is_default_arg=$port
+                ask string is_new_port "请输入新端口 (当前: $port, 回车保持):"
+                [[ $is_new_port && $is_new_port != $port ]] && {
+                    [[ ! $(is_test port $is_new_port) ]] && err "请输入正确的端口, 可选(1-65535)"
+                    [[ $is_new_port != 443 && $(is_test port_used $is_new_port) ]] && err "无法使用 ($is_new_port) 端口"
+                }
             }
-            [[ $(type -P hostname) ]] && is_local_ips+=($(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^127\.0\.0\.1$'))
-            [[ ${#is_local_ips[@]} -gt 0 ]] && is_local_ips=($(printf '%s\n' "${is_local_ips[@]}" | awk '!seen[$0]++'))
-            [[ ${#is_local_ips[@]} -eq 0 ]] && err "未找到本机可用出口 IP."
-            is_tmp_list=("${is_local_ips[@]}")
-            ask list is_new_bind_ip "" "\n请选择出口 IP (本机可用地址):\n" "请选择序号 [1-${#is_tmp_list[@]}]:"
         }
-        if [[ $is_new_bind_ip =~ ^(clear|none|off|del|delete|清空|清除|删除|无|空)$ ]]; then
+        [[ $is_new_port ]] && port=$is_new_port
+        # 2) 新进口IP (inbound listen)
+        is_local_ips=()
+        [[ $(type -P ip) ]] && {
+            is_local_ips+=($(ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -v '^127\.0\.0\.1$'))
+            is_local_ips+=($(ip -o -6 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -vE '^(fe80|::1|::)'))
+        }
+        [[ $(type -P hostname) ]] && is_local_ips+=($(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^127\.0\.0\.1$'))
+        [[ ${#is_local_ips[@]} -gt 0 ]] && is_local_ips=($(printf '%s\n' "${is_local_ips[@]}" | awk '!seen[$0]++'))
+        if [[ ${#is_local_ips[@]} -gt 0 ]]; then
+            is_tmp_list=("${is_local_ips[@]}")
+            is_default_arg="${is_listen_ip:-::}"
+            ask list is_new_listen_ip "" "\n请选择进口 IP (本机可用地址):\n" "请选择序号 [1-${#is_tmp_list[@]}], 回车保持当前(${is_default_arg}):"
+        else
+            is_new_listen_ip=
+        fi
+        is_listen_ip=$is_new_listen_ip
+        # 3) 新出口IP (outbound bind)
+        if [[ ${#is_local_ips[@]} -gt 0 ]]; then
+            is_tmp_list=("${is_local_ips[@]}")
+            is_default_arg="${is_bind_ip:-__keep__}"
+            ask list is_new_bind_ip "" "\n请选择出口 IP (本机可用地址):\n" "请选择序号 [1-${#is_tmp_list[@]}], 回车保持当前(${is_bind_ip:-未绑定}):"
+        else
             is_new_bind_ip=
-        elif [[ $is_new_bind_ip ]]; then
+        fi
+        [[ $is_new_bind_ip == '__keep__' ]] && is_new_bind_ip=
+        if [[ $is_new_bind_ip ]]; then
             validate_ip "$is_new_bind_ip" || err "($is_new_bind_ip) 不是有效的 IPv4 / IPv6 地址."
         fi
         is_bind_ip=$is_new_bind_ip
@@ -954,8 +931,7 @@ add() {
         is_use_port=$2
         is_use_uuid=$3
         is_use_servername=$4
-        is_use_bind=$5
-        is_add_opts="[port] [uuid] [sni] [bind_ip]"
+        is_add_opts="[port] [uuid] [sni]"
         ;;
     shadowsocks)
         is_use_port=$2
@@ -1068,11 +1044,6 @@ add() {
         [[ $is_use_host ]] && host=$is_use_host
         [[ $is_use_door_addr ]] && door_addr=$is_use_door_addr
         [[ $is_use_servername ]] && is_servername=$is_use_servername
-        [[ $is_use_bind ]] && {
-            [[ $is_use_bind == clear ]] && is_use_bind=
-            [[ $is_use_bind ]] && validate_ip "$is_use_bind" || err "($is_use_bind) 不是有效的 IPv4 / IPv6 地址."
-            is_bind_ip=$is_use_bind
-        }
         [[ $is_use_socks_user ]] && is_socks_user=$is_use_socks_user
         [[ $is_use_socks_pass ]] && is_socks_pass=$is_use_socks_pass
     fi
@@ -1205,9 +1176,9 @@ get() {
         get file $2
         if [[ $is_config_file ]]; then
             is_json_str=$(cat $is_conf_dir/"$is_config_file" | sed s#//.*##)
-            is_json_data=$(jq '(.inbounds[0]|.type,.listen_port,(.users[0]|.uuid,.password,.username),.method,.password,.override_port,.override_address,(.transport|.type,.path,.headers.host),(.tls|.server_name,.reality.private_key)),(.outbounds[1].tag),(.outbounds[0]|.bind_interface,.inet4_bind_address,.inet6_bind_address)' <<<$is_json_str)
+            is_json_data=$(jq '(.inbounds[0]|.type,.listen_port,.listen,(.users[0]|.uuid,.password,.username),.method,.password,.override_port,.override_address,(.transport|.type,.path,.headers.host),(.tls|.server_name,.reality.private_key)),(.outbounds[1].tag),(.outbounds[0]|.bind_interface,.inet4_bind_address,.inet6_bind_address)' <<<$is_json_str)
             [[ $? != 0 ]] && err "无法读取此文件: $is_config_file"
-            is_up_var_set=(null is_protocol port uuid password username ss_method ss_password door_port door_addr net_type path host is_servername is_private_key is_public_key is_bind_iface is_bind4 is_bind6)
+            is_up_var_set=(null is_protocol port is_listen_ip uuid password username ss_method ss_password door_port door_addr net_type path host is_servername is_private_key is_public_key is_bind_iface is_bind4 is_bind6)
             [[ $is_debug ]] && msg "\n------------- debug: $is_config_file -------------"
             i=0
             for v in $(sed 's/""/null/g;s/"//g' <<<"$is_json_data"); do
@@ -1530,17 +1501,17 @@ info() {
         ;;
     reality)
         is_color=41
-        is_can_change=(0 1 5 9 10 13)
+        is_can_change=(0 5 9 10 13)
         is_flow=xtls-rprx-vision
         is_net_type=tcp
         if [[ $net_type =~ "http" || ${is_new_protocol,,} =~ "http" ]]; then
             is_flow=
             is_net_type=h2
-            is_info_show=(0 1 2 3 4 8 16 17 18 22)
-            is_info_str=($is_protocol $is_addr $port $uuid $is_net_type reality $is_servername chrome $is_public_key $is_bind_ip)
+            is_info_show=(0 1 2 3 4 8 16 17 18 22 23)
+            is_info_str=($is_protocol $is_addr $port $uuid $is_net_type reality $is_servername chrome $is_public_key $is_bind_ip $is_listen_ip)
         else
-            is_info_show=(0 1 2 3 15 4 8 16 17 18 22)
-            is_info_str=($is_protocol $is_addr $port $uuid $is_flow $is_net_type reality $is_servername chrome $is_public_key $is_bind_ip)
+            is_info_show=(0 1 2 3 15 4 8 16 17 18 22 23)
+            is_info_str=($is_protocol $is_addr $port $uuid $is_flow $is_net_type reality $is_servername chrome $is_public_key $is_bind_ip $is_listen_ip)
         fi
         is_url="$is_protocol://$uuid@$is_addr:$port?encryption=none&security=reality&flow=$is_flow&type=$is_net_type&sni=$is_servername&pbk=$is_public_key&fp=chrome#$net-$is_addr"
         ;;
@@ -1748,162 +1719,9 @@ is_main_menu() {
 
 # check prefer args, if not exist prefer args and show main menu
 main() {
-    case $1 in
-    a | add | gen | no-auto-tls)
-        [[ $1 == 'gen' ]] && is_gen=1
-        [[ $1 == 'no-auto-tls' ]] && is_no_auto_tls=1
-        add ${@:2}
-        ;;
-    bin | pbk | check | completion | format | generate | geoip | geosite | merge | rule-set | run | tools)
-        is_run_command=$1
-        if [[ $1 == 'bin' ]]; then
-            $is_core_bin ${@:2}
-        else
-            [[ $is_run_command == 'pbk' ]] && is_run_command="generate reality-keypair"
-            $is_core_bin $is_run_command ${@:2}
-        fi
-        ;;
-    bbr)
-        load bbr.sh
-        _try_enable_bbr
-        ;;
-    c | config | change)
-        change ${@:2}
-        ;;
-    # client | genc)
-    #     create client $2
-    #     ;;
-    d | del | rm)
-        del $2
-        ;;
-    dd | ddel | fix | fix-all)
-        case $1 in
-        fix)
-            [[ $2 ]] && {
-                change $2 full
-            } || {
-                is_change_id=full && change
-            }
-            return
-            ;;
-        fix-all)
-            is_dont_auto_exit=1
-            msg
-            for v in $(ls $is_conf_dir | grep .json$ | sed '/dynamic-port-.*-link/d;/^route\.json$/d'); do
-                msg "fix: $v"
-                change $v full
-            done
-            _green "\nfix 完成.\n"
-            ;;
-        *)
-            is_dont_auto_exit=1
-            [[ ! $2 ]] && {
-                err "无法找到需要删除的参数"
-            } || {
-                for v in ${@:2}; do
-                    del $v
-                done
-            }
-            ;;
-        esac
-        is_dont_auto_exit=
-        manage restart &
-        [[ $is_del_host ]] && manage restart caddy &
-        ;;
-    dns)
-        load dns.sh
-        dns_set ${@:2}
-        ;;
-    debug)
-        is_debug=1
-        get info $2
-        warn "如果需要复制; 请把 *uuid, *password, *host, *key 的值改写, 以避免泄露."
-        ;;
-    fix-config.json)
-        create config.json
-        build_route_json
-        ;;
-    fix-caddyfile)
-        if [[ $is_caddy ]]; then
-            load caddy.sh
-            caddy_config new
-            manage restart caddy &
-            _green "\nfix 完成.\n"
-        else
-            err "无法执行此操作"
-        fi
-        ;;
-    i | info)
-        info $2
-        ;;
-    ip)
-        get_ip
-        msg $ip
-        ;;
-    in | import)
-        load import.sh
-        ;;
-    log)
-        load log.sh
-        log_set $2
-        ;;
-    url | qr)
-        url_qr $@
-        ;;
-    un | uninstall)
-        uninstall
-        ;;
-    u | up | update | U | update.sh)
-        is_update_name=$2
-        is_update_ver=$3
-        [[ ! $is_update_name ]] && is_update_name=core
-        [[ $1 == 'U' || $1 == 'update.sh' ]] && {
-            is_update_name=sh
-            is_update_ver=
-        }
-        update $is_update_name $is_update_ver
-        ;;
-    ssss | ss2022)
-        get $@
-        ;;
-    s | status)
-        msg "\n$is_core_name $is_core_ver: $is_core_status\n"
-        [[ $is_caddy ]] && msg "Caddy $is_caddy_ver: $is_caddy_status\n"
-        ;;
-    start | stop | r | restart)
-        [[ $2 && $2 != 'caddy' ]] && err "无法识别 ($2), 请使用: $is_core $1 [caddy]"
-        manage $1 $2 &
-        ;;
-    t | test)
-        get test-run
-        ;;
-    reinstall)
-        get $1
-        ;;
-    get-port)
-        get_port
-        msg $tmp_port
-        ;;
-    main)
-        is_main_menu
-        ;;
-    v | ver | version)
-        [[ $is_caddy_ver ]] && is_caddy_ver="/ $(_blue Caddy $is_caddy_ver)"
-        msg "\n$(_green $is_core_name $is_core_ver) / $(_cyan $is_core_name script $is_sh_ver) $is_caddy_ver\n"
-        ;;
-    *)
-        is_try_change=1
-        change test $1
-        if [[ $is_change_id ]]; then
-            unset is_try_change
-            [[ $2 ]] && {
-                change $2 $1 ${@:3}
-            } || {
-                change
-            }
-        else
-            err "无法识别 ($1), 请使用: $is_core"
-        fi
-        ;;
-    esac
+    is_main_menu
 }
+
+_myself=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")
+_invoker=$(readlink -f "$0" 2>/dev/null || echo "$0")
+[[ "$_myself" == "$_invoker" ]] && main "$@"

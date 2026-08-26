@@ -177,7 +177,7 @@ download() {
         is_ok=$is_core_ok
         ;;
     sh)
-        link=https://codeload.github.com/${is_sh_repo}/tar.gz/main
+        link=https://codeload.github.com/${is_sh_repo}/tar.gz/dev-v2
         name="$is_core_name 脚本"
         tmpfile=$tmpsh
         is_ok=$is_sh_ok

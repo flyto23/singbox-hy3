@@ -1512,11 +1512,11 @@ info() {
         if [[ $net_type =~ "http" || ${is_new_protocol,,} =~ "http" ]]; then
             is_flow=
             is_net_type=h2
-            is_info_show=(0 1 2 3 4 8 16 17 18 22 23)
-            is_info_str=($is_protocol $is_addr $port $uuid $is_net_type reality $is_servername chrome $is_public_key $is_bind_ip $is_listen_ip)
+            is_info_show=(0 1 2 3 4 8 16 17 18 23 22)
+            is_info_str=($is_protocol $is_addr $port $uuid $is_net_type reality $is_servername chrome $is_public_key $is_listen_ip $is_bind_ip)
         else
-            is_info_show=(0 1 2 3 15 4 8 16 17 18 22 23)
-            is_info_str=($is_protocol $is_addr $port $uuid $is_flow $is_net_type reality $is_servername chrome $is_public_key $is_bind_ip $is_listen_ip)
+            is_info_show=(0 1 2 3 15 4 8 16 17 18 23 22)
+            is_info_str=($is_protocol $is_addr $port $uuid $is_flow $is_net_type reality $is_servername chrome $is_public_key $is_listen_ip $is_bind_ip)
         fi
         is_url="$is_protocol://$uuid@$is_addr:$port?encryption=none&security=reality&flow=$is_flow&type=$is_net_type&sni=$is_servername&pbk=$is_public_key&fp=chrome#$net-$is_addr"
         ;;

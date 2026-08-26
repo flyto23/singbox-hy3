@@ -1148,12 +1148,17 @@ add() {
 get() {
     case $1 in
     addr)
-        is_addr=$host
-        [[ ! $is_addr ]] && {
-            get_ip
-            is_addr=$ip
-            [[ $(grep ":" <<<$ip) ]] && is_addr="[$ip]"
-        }
+        if [[ $is_listen_ip && $is_listen_ip != '::' ]]; then
+            is_addr=$is_listen_ip
+            [[ $(grep ":" <<<$is_addr) && ! $(grep -F "[" <<<$is_addr) ]] && is_addr="[$is_addr]"
+        else
+            is_addr=$host
+            [[ ! $is_addr ]] && {
+                get_ip
+                is_addr=$ip
+                [[ $(grep ":" <<<$ip) ]] && is_addr="[$ip]"
+            }
+        fi
         ;;
     new)
         [[ ! $host ]] && get_ip

@@ -188,6 +188,28 @@ validate_ip() {
     return 1
 }
 
+# unified input validators; on failure set VALIDATE_ERR and return 1
+validate_port() {
+    local p=$1 mode=${2:-ask}
+    [[ ! $(is_test port "$p") ]] && { VALIDATE_ERR="请输入正确的端口, 可选(1-65535)"; return 1; }
+    [[ $mode == door ]] && return 0
+    [[ $mode == change ]] && { [[ $p == 443 || $p == "$port" ]] && return 0; }
+    [[ $(is_test port_used "$p") ]] && { VALIDATE_ERR="无法使用 ($p) 端口."; return 1; }
+    return 0
+}
+validate_uuid() {
+    [[ $(is_test uuid "$1") ]] && return 0
+    [[ ! $tmp_uuid ]] && get_uuid
+    VALIDATE_ERR="请输入正确的 UUID, 例如: $tmp_uuid"
+    return 1
+}
+validate_path() {
+    [[ $(is_test path "$1") ]] && return 0
+    [[ ! $tmp_uuid ]] && get_uuid
+    VALIDATE_ERR="请输入正确的路径, 例如: /$tmp_uuid"
+    return 1
+}
+
 # rebuild route rules into the MAIN config.json.
 # sing-box merges the -C directory for inbounds/outbounds only, NOT route blocks,
 # so the route rules must live in the main config.json. Each reality inbound is
@@ -328,30 +350,16 @@ ask() {
         read REPLY
         [[ ! $REPLY && $is_emtpy_exit ]] && exit
         [[ ! $REPLY && $is_default_arg ]] && export $is_ask_set=$is_default_arg && break
-        [[ "$REPLY" == "${is_str}2${is_get}3${is_opt}3" && $is_ask_set == 'is_main_pick' ]] && {
-            msg "\n${is_get}2${is_str}3${is_msg}3b${is_tmp}o${is_opt}y\n" && exit
-        }
         if [[ ! $is_tmp_list ]]; then
             [[ $(grep port <<<$is_ask_set) ]] && {
-                [[ ! $(is_test port "$REPLY") ]] && {
-                    msg "$is_err 请输入正确的端口, 可选(1-65535)"
-                    continue
-                }
-                if [[ $(is_test port_used $REPLY) && $is_ask_set != 'door_port' ]]; then
-                    msg "$is_err 无法使用 ($REPLY) 端口."
-                    continue
+                if [[ $is_ask_set == 'door_port' ]]; then
+                    validate_port "$REPLY" door || { msg "$is_err $VALIDATE_ERR"; continue; }
+                else
+                    validate_port "$REPLY" ask || { msg "$is_err $VALIDATE_ERR"; continue; }
                 fi
             }
-            [[ $(grep path <<<$is_ask_set) && ! $(is_test path "$REPLY") ]] && {
-                [[ ! $tmp_uuid ]] && get_uuid
-                msg "$is_err 请输入正确的路径, 例如: /$tmp_uuid"
-                continue
-            }
-            [[ $(grep uuid <<<$is_ask_set) && ! $(is_test uuid "$REPLY") ]] && {
-                [[ ! $tmp_uuid ]] && get_uuid
-                msg "$is_err 请输入正确的 UUID, 例如: $tmp_uuid"
-                continue
-            }
+            [[ $(grep path <<<$is_ask_set) ]] && { validate_path "$REPLY" || { msg "$is_err $VALIDATE_ERR"; continue; } }
+            [[ $(grep uuid <<<$is_ask_set) ]] && { validate_uuid "$REPLY" || { msg "$is_err $VALIDATE_ERR"; continue; } }
             [[ $(grep ^y$ <<<$is_ask_set) ]] && {
                 [[ $(grep -i ^y$ <<<"$REPLY") ]] && break
                 msg "请输入 (y)"
@@ -499,8 +507,7 @@ change() {
         is_new_port=$3
         [[ $host && ! $is_caddy || $is_no_auto_tls ]] && err "($is_config_file) 不支持更改端口, 因为没啥意义."
         if [[ $is_new_port && ! $is_auto ]]; then
-            [[ ! $(is_test port $is_new_port) ]] && err "请输入正确的端口, 可选(1-65535)"
-            [[ $is_new_port != 443 && $(is_test port_used $is_new_port) ]] && err "无法使用 ($is_new_port) 端口"
+            validate_port "$is_new_port" change || err "$VALIDATE_ERR"
         fi
         [[ $is_auto ]] && get_port && is_new_port=$tmp_port
         [[ ! $is_new_port ]] && ask string is_new_port "请输入新端口:"
@@ -631,9 +638,6 @@ change() {
         [[ $is_auto ]] && is_new_servername=$is_random_servername
         [[ ! $is_new_servername ]] && ask string is_new_servername "请输入新的 serverName:"
         is_servername=$is_new_servername
-        [[ $(grep -i "^233boy.com$" <<<$is_servername) ]] && {
-            err "你干嘛～哎呦～"
-        }
         add $net
         ;;
     12)
@@ -648,8 +652,7 @@ change() {
         # 1) 新端口
         is_new_port=$3
         if [[ $is_new_port && ! $is_auto ]]; then
-            [[ ! $(is_test port $is_new_port) ]] && err "请输入正确的端口, 可选(1-65535)"
-            [[ $is_new_port != 443 && $is_new_port != $port && $(is_test port_used $is_new_port) ]] && err "无法使用 ($is_new_port) 端口"
+            validate_port "$is_new_port" change || err "$VALIDATE_ERR"
         fi
         [[ ! $is_new_port ]] && {
             [[ $is_auto ]] && get_port && is_new_port=$tmp_port
@@ -657,8 +660,7 @@ change() {
                 is_default_arg=$port
                 ask string is_new_port "请输入新端口 (当前: $port, 回车保持):"
                 [[ $is_new_port && $is_new_port != $port ]] && {
-                    [[ ! $(is_test port $is_new_port) ]] && err "请输入正确的端口, 可选(1-65535)"
-                    [[ $is_new_port != 443 && $(is_test port_used $is_new_port) ]] && err "无法使用 ($is_new_port) 端口"
+                    validate_port "$is_new_port" change || err "$VALIDATE_ERR"
                 }
             }
         }
@@ -837,45 +839,26 @@ manage() {
 add() {
     is_lower=${1,,}
     if [[ $is_lower ]]; then
+        declare -A protocol_alias=(
+            [ws]=VMess-WS [tcp]=VMess-TCP [quic]=VMess-QUIC [http]=VMess-HTTP
+            [wss]=VMess-WS-TLS [h2]=VMess-H2-TLS [hu]=VMess-HTTPUpgrade-TLS
+            [vws]=VLESS-WS-TLS [vh2]=VLESS-H2-TLS [vhu]=VLESS-HTTPUpgrade-TLS
+            [tws]=Trojan-WS-TLS [th2]=Trojan-H2-TLS [thu]=Trojan-HTTPUpgrade-TLS
+            [r]=VLESS-REALITY [reality]=VLESS-REALITY [rh2]=VLESS-HTTP2-REALITY
+            [ss]=Shadowsocks [door]=Direct [direct]=Direct [tuic]=TUIC
+            [hy]=Hysteria2 [hy2]=Hysteria2 [anytls]=AnyTLS [socks]=Socks [trojan]=Trojan
+        )
         case $is_lower in
-        ws | tcp | quic | http)
-            is_new_protocol=VMess-${is_lower^^}
-            ;;
-        wss | h2 | hu | vws | vh2 | vhu | tws | th2 | thu)
-            is_new_protocol=$(sed -E "s/^V/VLESS-/;s/^T/Trojan-/;/^(W|H)/{s/^/VMess-/};s/WSS/WS/;s/HU/HTTPUpgrade/" <<<${is_lower^^})-TLS
-            ;;
-        r | reality)
-            is_new_protocol=VLESS-REALITY
-            ;;
-        rh2)
-            is_new_protocol=VLESS-HTTP2-REALITY
-            ;;
-        ss)
-            is_new_protocol=Shadowsocks
-            ;;
-        door | direct)
-            is_new_protocol=Direct
-            ;;
-        tuic)
-            is_new_protocol=TUIC
-            ;;
-        hy | hy2 | hysteria*)
+        hysteria*)
             is_new_protocol=Hysteria2
             ;;
-        trojan)
-            is_new_protocol=Trojan
-            ;;
-        anytls)
-            is_new_protocol=AnyTLS
-            ;;
-        socks)
-            is_new_protocol=Socks
-            ;;
         *)
-            for v in ${protocol_list[@]}; do
-                [[ $(grep -E -i "^$is_lower$" <<<$v) ]] && is_new_protocol=$v && break
-            done
-
+            is_new_protocol=${protocol_alias[$is_lower]}
+            [[ ! $is_new_protocol ]] && {
+                for v in ${protocol_list[@]}; do
+                    [[ $(grep -E -i "^$is_lower$" <<<$v) ]] && is_new_protocol=$v && break
+                done
+            }
             [[ ! $is_new_protocol ]] && err "无法识别 ($1), 请使用: $is_core add [protocol] [args... | auto]"
             ;;
         esac
@@ -1169,6 +1152,7 @@ get() {
             [[ $? != 0 ]] && err "无法读取此文件: $is_config_file"
             is_up_var_set=(null is_protocol port is_listen_ip uuid password username ss_method ss_password door_port door_addr net_type path host is_servername is_private_key is_public_key is_bind_iface is_bind4 is_bind6)
             [[ $is_debug ]] && msg "\n------------- debug: $is_config_file -------------"
+            local i v
             i=0
             for v in $(sed 's/""/null/g;s/"//g' <<<"$is_json_data"); do
                 ((i++))
@@ -1413,6 +1397,7 @@ get() {
 
 # show info
 info() {
+    local i a tt
     if [[ ! $is_protocol ]]; then
         get info $1
     fi

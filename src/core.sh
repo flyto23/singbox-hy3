@@ -484,8 +484,9 @@ change() {
     is_dont_show_info=
     # if not prefer args, show change list and then get change id.
     [[ ! $is_change_id ]] && {
+        [[ $is_reality ]] && is_default_arg=1
         ask set_change_list
-        is_change_id=${is_can_change[$REPLY - 1]}
+        [[ ! $REPLY ]] && is_change_id=${is_can_change[0]} || is_change_id=${is_can_change[$REPLY - 1]}
     }
     case $is_change_id in
     0)
@@ -672,8 +673,8 @@ change() {
         [[ ${#is_local_ips[@]} -gt 0 ]] && is_local_ips=($(printf '%s\n' "${is_local_ips[@]}" | awk '!seen[$0]++'))
         if [[ ${#is_local_ips[@]} -gt 0 ]]; then
             is_tmp_list=("${is_local_ips[@]}")
-            is_default_arg="${is_listen_ip:-::}"
-            ask list is_new_listen_ip "" "\n请选择进口 IP (本机可用地址):\n" "请选择序号 [1-${#is_tmp_list[@]}], 回车保持当前(${is_default_arg}):"
+            is_default_arg=${is_tmp_list[0]}
+            ask list is_new_listen_ip "" "\n请选择进口 IP (本机可用地址):\n" "请选择序号 [1-${#is_tmp_list[@]}], 回车选择第一项(${is_default_arg}):"
         else
             is_new_listen_ip=
         fi
@@ -681,8 +682,8 @@ change() {
         # 3) 新出口IP (outbound bind)
         if [[ ${#is_local_ips[@]} -gt 0 ]]; then
             is_tmp_list=("${is_local_ips[@]}")
-            is_default_arg="${is_bind_ip:-__keep__}"
-            ask list is_new_bind_ip "" "\n请选择出口 IP (本机可用地址):\n" "请选择序号 [1-${#is_tmp_list[@]}], 回车保持当前(${is_bind_ip:-未绑定}):"
+            is_default_arg=${is_tmp_list[0]}
+            ask list is_new_bind_ip "" "\n请选择出口 IP (本机可用地址):\n" "请选择序号 [1-${#is_tmp_list[@]}], 回车选择第一项(${is_default_arg}):"
         else
             is_new_bind_ip=
         fi
@@ -1489,7 +1490,7 @@ info() {
         ;;
     reality)
         is_color=41
-        is_can_change=(0 5 9 10 13)
+        is_can_change=(13 0 5 9 10)
         is_flow=xtls-rprx-vision
         is_net_type=tcp
         if [[ $net_type =~ "http" || ${is_new_protocol,,} =~ "http" ]]; then

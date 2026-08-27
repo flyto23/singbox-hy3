@@ -210,6 +210,27 @@ validate_path() {
     return 1
 }
 
+# extracted utility helpers (reusable, no change to existing flows)
+version_compare() {
+    local v1="$1" v2="$2" IFS='.' a b i p1 p2
+    read -ra a <<<"$v1"
+    read -ra b <<<"$v2"
+    for i in 0 1 2; do
+        p1=${a[$i]:-0}; p2=${b[$i]:-0}
+        (( p1 > p2 )) && return 1
+        (( p1 < p2 )) && return 2
+    done
+    return 0
+}
+
+get_ip_type() {
+    [[ $1 == *:* ]] && echo ipv6 || echo ipv4
+}
+
+jq_safe() {
+    jq -r "$1 // empty" "$2" 2>/dev/null
+}
+
 # rebuild route rules into the MAIN config.json.
 # sing-box merges the -C directory for inbounds/outbounds only, NOT route blocks,
 # so the route rules must live in the main config.json. Each reality inbound is
@@ -240,12 +261,6 @@ show_list() {
     COLUMNS=1
     select i in "$@"; do echo; done &
     wait
-    # i=0
-    # for v in "$@"; do
-    #     ((i++))
-    #     echo "$i) $v"
-    # done
-    # echo
 
 }
 
@@ -1545,10 +1560,7 @@ info() {
 footer_msg() {
     [[ $is_core_stop && ! $is_new_json ]] && warn "$is_core_name 当前处于停止状态."
     [[ $is_caddy_stop && $host ]] && warn "Caddy 当前处于停止状态."
-    ####### 要点13脸吗只会改我链接的小人 #######
-    unset c n m s b
     msg "------------- END -------------"
-    ####### 要点13脸吗只会改我链接的小人 #######
 }
 
 # update core, sh, caddy

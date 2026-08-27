@@ -694,6 +694,7 @@ change() {
         add $net
         ;;
     esac
+    [[ $is_config_name ]] && is_config_file=$is_config_name
 }
 
 # delete config.
@@ -1122,7 +1123,7 @@ add() {
     create server $is_new_protocol
 
     # show config info.
-    info
+    info $is_config_name
 }
 
 # get config info

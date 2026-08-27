@@ -119,6 +119,10 @@ msg_ul() {
     echo -e "\e[4m$@\e[0m"
 }
 
+print_no_auto_tls_hint() {
+    msg "\e[41m no-auto-tls 帮助(help)\e[0m: $(msg_ul https://233boy.com/$is_core/no-auto-tls/)\n"
+}
+
 # pause
 pause() {
     echo
@@ -140,6 +144,12 @@ get_ip() {
     }
 }
 
+# ---- 可定制常量 (改这里即可调整默认值) ----
+PORT_MIN=445
+PORT_MAX=65535
+NTP_SERVER=time.apple.com
+LOG_PATH=/var/log/$is_core/access.log
+
 get_port() {
     is_count=0
     while :; do
@@ -147,7 +157,7 @@ get_port() {
         if [[ $is_count -ge 233 ]]; then
             err "自动获取可用端口失败次数达到 233 次, 请检查端口占用情况."
         fi
-        tmp_port=$(shuf -i 445-65535 -n 1)
+        tmp_port=$(shuf -i ${PORT_MIN}-${PORT_MAX} -n 1)
         [[ ! $(is_test port_used $tmp_port) && $tmp_port != $port ]] && break
     done
 }
@@ -178,7 +188,7 @@ validate_ip() {
     local ip=$1 o
     # IPv4
     if [[ $ip =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-        for o in ${ip//./ }; do
+        local o; for o in ${ip//./ }; do
             [[ 10#$o -gt 255 ]] && return 1
         done
         return 0
@@ -231,6 +241,20 @@ jq_safe() {
     jq -r "$1 // empty" "$2" 2>/dev/null
 }
 
+_wait_core_alive() {
+    sleep 2
+    [[ $(pgrep -f $is_run_bin) ]] && return 0
+    is_run_fail=${is_do_name_msg,,}
+    [[ ! $is_no_manage_msg ]] && {
+        msg
+        warn "($is_do_msg) $is_do_name_msg 失败"
+        _yellow "检测到运行失败, 自动执行测试运行."
+        get test-run
+        _yellow "测试结束, 请按 Enter 退出."
+    }
+    return 1
+}
+
 # rebuild route rules into the MAIN config.json.
 # sing-box merges the -C directory for inbounds/outbounds only, NOT route blocks,
 # so the route rules must live in the main config.json. Each reality inbound is
@@ -257,37 +281,23 @@ build_route_json() {
 }
 
 show_list() {
-    PS3=''
-    COLUMNS=1
-    select i in "$@"; do echo; done &
-    wait
-
+    local i=1
+    for item in "$@"; do
+        printf "  %2d) %s\n" "$i" "$item"
+        ((i++))
+    done
 }
 
 is_test() {
+    local v=$2
     case $1 in
-    number)
-        echo $2 | grep -E '^[1-9][0-9]?+$'
-        ;;
-    port)
-        if [[ $(is_test number $2) ]]; then
-            [[ $2 -le 65535 ]] && echo ok
-        fi
-        ;;
-    port_used)
-        [[ $(is_port_used $2) && ! $is_cant_test_port ]] && echo ok
-        ;;
-    domain)
-        echo $2 | grep -E -i '^\w(\w|\-|\.)?+\.\w+$'
-        ;;
-    path)
-        echo $2 | grep -E -i '^\/\w(\w|\-|\/)?+\w$'
-        ;;
-    uuid)
-        echo $2 | grep -E -i '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
-        ;;
+    number)     [[ $v =~ ^[1-9][0-9]*$ ]] && echo ok ;;
+    port)       [[ $v =~ ^[0-9]+$ ]] && (( v >= 1 && v <= 65535 )) && echo ok ;;
+    port_used)  [[ $(is_port_used "$v") && ! $is_cant_test_port ]] && echo ok ;;
+    domain)     [[ $v =~ ^[[:alnum:]]([[:alnum:]_-]*\.)+[[:alpha:]]+$ ]] && echo ok ;;
+    path)       [[ $v =~ ^/[[:alnum:]_./-]+$ ]] && echo ok ;;
+    uuid)       [[ $v =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]] && echo ok ;;
     esac
-
 }
 
 is_port_used() {
@@ -308,6 +318,7 @@ is_port_used() {
 
 # ask input a string or pick a option for list.
 ask() {
+    local i v a tt o
     case $1 in
     set_ss_method)
         is_tmp_list=(${ss_method_list[@]})
@@ -321,7 +332,7 @@ ask() {
         [[ $is_no_auto_tls ]] && {
             unset is_tmp_list
             for v in ${protocol_list[@]}; do
-                [[ $(grep -i "\-tls$" <<<$v) ]] && is_tmp_list=(${is_tmp_list[@]} $v)
+                [[ ${v,,} =~ -tls$ ]] && is_tmp_list=(${is_tmp_list[@]} $v)
             done
         }
         is_opt_msg="\n请选择协议:\n"
@@ -366,17 +377,17 @@ ask() {
         [[ ! $REPLY && $is_emtpy_exit ]] && exit
         [[ ! $REPLY && $is_default_arg ]] && export $is_ask_set=$is_default_arg && break
         if [[ ! $is_tmp_list ]]; then
-            [[ $(grep port <<<$is_ask_set) ]] && {
+            [[ $is_ask_set == *port* ]] && {
                 if [[ $is_ask_set == 'door_port' ]]; then
                     validate_port "$REPLY" door || { msg "$is_err $VALIDATE_ERR"; continue; }
                 else
                     validate_port "$REPLY" ask || { msg "$is_err $VALIDATE_ERR"; continue; }
                 fi
             }
-            [[ $(grep path <<<$is_ask_set) ]] && { validate_path "$REPLY" || { msg "$is_err $VALIDATE_ERR"; continue; } }
-            [[ $(grep uuid <<<$is_ask_set) ]] && { validate_uuid "$REPLY" || { msg "$is_err $VALIDATE_ERR"; continue; } }
-            [[ $(grep ^y$ <<<$is_ask_set) ]] && {
-                [[ $(grep -i ^y$ <<<"$REPLY") ]] && break
+            [[ $is_ask_set == *path* ]] && { validate_path "$REPLY" || { msg "$is_err $VALIDATE_ERR"; continue; } }
+            [[ $is_ask_set == *uuid* ]] && { validate_uuid "$REPLY" || { msg "$is_err $VALIDATE_ERR"; continue; } }
+            [[ $is_ask_set == [Yy] ]] && {
+                [[ $REPLY =~ ^[Yy]$ ]] && break
                 msg "请输入 (y)"
                 continue
             }
@@ -392,22 +403,48 @@ ask() {
 }
 
 # create file
+_config_filename() {
+    local proto=$1
+    if [[ $host ]]; then
+        is_config_name=$proto-${host}.json
+    elif [[ $is_anytls_domain ]]; then
+        is_config_name=$proto-${is_anytls_domain}.json
+    else
+        is_config_name=$proto-${port}.json
+    fi
+}
+
+_resolve_listen() {
+    if [[ $host ]]; then
+        is_listen='listen: "127.0.0.1"'
+    else
+        is_listen='listen: "::"'
+        [[ $is_listen_ip ]] && is_listen="listen: \"$is_listen_ip\""
+    fi
+}
+
+select_local_ip() {
+    local prompt="$1" var="$2"
+    is_local_ips=()
+    [[ $(type -P ip) ]] && {
+        is_local_ips+=($(ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -v '^127\.0\.0\.1$'))
+        is_local_ips+=($(ip -o -6 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -vE '^(fe80|::1|::)'))
+    }
+    [[ $(type -P hostname) ]] && is_local_ips+=($(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^127\.0\.0\.1$'))
+    [[ ${#is_local_ips[@]} -gt 0 ]] && is_local_ips=($(printf '%s\n' "${is_local_ips[@]}" | awk '!seen[$0]++'))
+    [[ ${#is_local_ips[@]} -eq 0 ]] && { eval "$var="; return 1; }
+    is_tmp_list=("${is_local_ips[@]}")
+    is_default_arg=${is_tmp_list[0]}
+    ask list "$var" "" "$prompt" "请选择序号 [1-${#is_tmp_list[@]}], 回车选择第一项(${is_default_arg}):"
+}
+
 create() {
     case $1 in
     server)
         is_tls=none
         get new
-        # file name
-        if [[ $host ]]; then
-            is_config_name=$2-${host}.json
-            is_listen='listen: "127.0.0.1"'
-        elif [[ $is_anytls_domain ]]; then
-            is_config_name=$2-${is_anytls_domain}.json
-        else
-            is_config_name=$2-${port}.json
-            is_listen='listen: "::"'
-            [[ $is_listen_ip ]] && is_listen="listen: \"$is_listen_ip\""
-        fi
+        _config_filename "$2"
+        _resolve_listen
         is_json_file=$is_conf_dir/$is_config_name
         # get json
         [[ $is_change || ! $json_str ]] && get protocol $2
@@ -462,9 +499,9 @@ create() {
         manage restart caddy &
         ;;
     config.json)
-        is_log='log:{output:"/var/log/'$is_core'/access.log",level:"info","timestamp":true}'
+        is_log='log:{output:"'$LOG_PATH'",level:"info","timestamp":true}'
         is_dns='dns:{}'
-        is_ntp='ntp:{"enabled":true,"server":"time.apple.com"},'
+        is_ntp='ntp:{"enabled":true,"server":"'$NTP_SERVER'"},'
         if [[ -f $is_config_json ]]; then
             [[ $(jq .ntp.enabled $is_config_json) != "true" ]] && is_ntp=
         else
@@ -480,6 +517,7 @@ create() {
 
 # change config file
 change() {
+    local i v a tt o
     is_change=1
     is_dont_show_info=1
     if [[ $2 ]]; then
@@ -681,29 +719,9 @@ change() {
         }
         [[ $is_new_port ]] && port=$is_new_port
         # 2) 新进口IP (inbound listen)
-        is_local_ips=()
-        [[ $(type -P ip) ]] && {
-            is_local_ips+=($(ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -v '^127\.0\.0\.1$'))
-            is_local_ips+=($(ip -o -6 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -vE '^(fe80|::1|::)'))
-        }
-        [[ $(type -P hostname) ]] && is_local_ips+=($(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^127\.0\.0\.1$'))
-        [[ ${#is_local_ips[@]} -gt 0 ]] && is_local_ips=($(printf '%s\n' "${is_local_ips[@]}" | awk '!seen[$0]++'))
-        if [[ ${#is_local_ips[@]} -gt 0 ]]; then
-            is_tmp_list=("${is_local_ips[@]}")
-            is_default_arg=${is_tmp_list[0]}
-            ask list is_new_listen_ip "" "\n请选择进口 IP (本机可用地址):\n" "请选择序号 [1-${#is_tmp_list[@]}], 回车选择第一项(${is_default_arg}):"
-        else
-            is_new_listen_ip=
-        fi
+        select_local_ip "\n请选择进口 IP (本机可用地址):\n" is_new_listen_ip
         is_listen_ip=$is_new_listen_ip
-        # 3) 新出口IP (outbound bind)
-        if [[ ${#is_local_ips[@]} -gt 0 ]]; then
-            is_tmp_list=("${is_local_ips[@]}")
-            is_default_arg=${is_tmp_list[0]}
-            ask list is_new_bind_ip "" "\n请选择出口 IP (本机可用地址):\n" "请选择序号 [1-${#is_tmp_list[@]}], 回车选择第一项(${is_default_arg}):"
-        else
-            is_new_bind_ip=
-        fi
+        select_local_ip "\n请选择出口 IP (本机可用地址):\n" is_new_bind_ip
         [[ $is_new_bind_ip == '__keep__' ]] && is_new_bind_ip=
         if [[ $is_new_bind_ip ]]; then
             validate_ip "$is_new_bind_ip" || err "($is_new_bind_ip) 不是有效的 IPv4 / IPv6 地址."
@@ -717,6 +735,7 @@ change() {
 
 # delete config.
 del() {
+    local i v a tt o
     # dont get ip
     is_dont_get_ip=1
     [[ $is_conf_dir_empty ]] && return # not found any json file.
@@ -787,6 +806,7 @@ uninstall() {
 
 # manage run status
 manage() {
+    local i v a tt o
     [[ $is_dont_auto_exit ]] && return
     case $1 in
     1 | start)
@@ -835,23 +855,12 @@ manage() {
             ;;
         esac
     fi
-    [[ $is_test_run && ! $is_new_install ]] && {
-        sleep 2
-        if [[ ! $(pgrep -f $is_run_bin) ]]; then
-            is_run_fail=${is_do_name_msg,,}
-            [[ ! $is_no_manage_msg ]] && {
-                msg
-                warn "($is_do_msg) $is_do_name_msg 失败"
-                _yellow "检测到运行失败, 自动执行测试运行."
-                get test-run
-                _yellow "测试结束, 请按 Enter 退出."
-            }
-        fi
-    }
+    [[ $is_test_run && ! $is_new_install ]] && _wait_core_alive
 }
 
 # add a config
 add() {
+    local i v a tt o
     is_lower=${1,,}
     if [[ $is_lower ]]; then
         declare -A protocol_alias=(
@@ -957,7 +966,7 @@ add() {
             ;;
         reality)
             net_type=
-            [[ ! $(grep -i reality <<<$is_new_protocol) ]] && is_reality=
+            [[ ! ${is_new_protocol,,} =~ reality ]] && is_reality=
             ;;
         ss)
             [[ $(is_test uuid $ss_password) ]] && uuid=$ss_password
@@ -979,18 +988,11 @@ add() {
         done
 
         if [[ $is_use_port ]]; then
-            [[ ! $(is_test port ${is_use_port}) ]] && {
-                err "($is_use_port) 不是一个有效的端口. $is_err_tips"
-            }
-            [[ $(is_test port_used $is_use_port) && ! $is_gen ]] && {
-                err "无法使用 ($is_use_port) 端口. $is_err_tips"
-            }
+            validate_port "$is_use_port" "${is_gen:+door}" || err "$VALIDATE_ERR $is_err_tips"
             port=$is_use_port
         fi
         if [[ $is_use_door_port ]]; then
-            [[ ! $(is_test port ${is_use_door_port}) ]] && {
-                err "(${is_use_door_port}) 不是一个有效的目标端口. $is_err_tips"
-            }
+            validate_port "$is_use_door_port" door || err "$VALIDATE_ERR $is_err_tips"
             door_port=$is_use_door_port
         fi
         if [[ $is_use_uuid ]]; then
@@ -1018,7 +1020,7 @@ add() {
                     msg "\t\t$v"
                 done
                 msg "$is_err_tips\n"
-                exit 1
+                return 1
             }
             ss_method=$is_tmp_use_type
         fi
@@ -1047,7 +1049,7 @@ add() {
                 get_port
                 is_https_port=$tmp_port
                 warn "端口 (80 或 443) 已经被占用, 你也可以考虑使用 no-auto-tls"
-                msg "\e[41m no-auto-tls 帮助(help)\e[0m: $(msg_ul https://233boy.com/$is_core/no-auto-tls/)\n"
+                print_no_auto_tls_hint
                 msg "\n Caddy 将使用非标准端口实现自动配置 TLS, HTTP:$is_http_port HTTPS:$is_https_port\n"
                 msg "请确定是否继续???"
                 pause
@@ -1128,6 +1130,7 @@ add() {
 # get config info
 # or somes required args
 get() {
+    local i v a tt o
     case $1 in
     addr)
         if [[ $is_listen_ip && $is_listen_ip != '::' ]]; then
@@ -1350,9 +1353,6 @@ get() {
         fi
         ;;
     ping)
-        # is_ip_type="-4"
-        # [[ $(grep ":" <<<$ip) ]] && is_ip_type="-6"
-        # is_host_dns=$(ping $host $is_ip_type -c 1 -W 2 | head -1)
         is_dns_type="a"
         [[ $(grep ":" <<<$ip) ]] && is_dns_type="aaaa"
         is_host_dns=$(_wget -qO- --header="accept: application/dns-json" "https://one.one.one.one/dns-query?name=$host&type=$is_dns_type")
@@ -1551,7 +1551,7 @@ info() {
         msg "------------- no-auto-tls INFO -------------"
         msg "端口(port): $port"
         msg "路径(path): $path"
-        msg "\e[41m帮助(help)\e[0m: $(msg_ul https://233boy.com/$is_core/no-auto-tls/)"
+        print_no_auto_tls_hint
     fi
     footer_msg
 }
@@ -1565,6 +1565,7 @@ footer_msg() {
 
 # update core, sh, caddy
 update() {
+    local i v a tt o
     case $1 in
     1 | core | $is_core)
         is_update_name=core
@@ -1614,6 +1615,7 @@ update() {
 
 # main menu; if no prefer args.
 is_main_menu() {
+    local i v a tt o
     msg "\n------------- $is_core_name script $is_sh_ver -------------"
     msg "$is_core_name $is_core_ver: $is_core_status"
     is_main_start=1

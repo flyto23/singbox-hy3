@@ -239,6 +239,7 @@ validate_path() {
 # ask_value 用的校验包装器 (校验函数需显式传入, 不再按变量名嗅探)
 v_port() { validate_port "$1" ask; }
 v_port_door() { validate_port "$1" door; }
+v_port_change() { validate_port "$1" change; } # change 模式: 443 或当前端口直接放行
 
 # 判断 is_core_ver 是否 >= 指定版本 (用法: core_at_least 1.12.0)
 core_at_least() {
@@ -799,7 +800,7 @@ change() {
         fi
         [[ ! $is_new_port ]] && {
             [[ $is_auto ]] && get_port && is_new_port=$tmp_port
-            [[ ! $is_new_port ]] && ask_value is_new_port "请输入新端口 (当前: $port, 回车保持):" "$port" v_port
+            [[ ! $is_new_port ]] && ask_value is_new_port "请输入新端口 (当前: $port, 回车保持):" "$port" v_port_change
         }
         [[ $is_new_port && $is_new_port != $port ]] && port=$is_new_port
         # 2) 新进口IP (inbound listen)

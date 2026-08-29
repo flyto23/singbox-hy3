@@ -72,7 +72,9 @@ servername_list=(
     aws.amazon.com
 )
 # 协议别名表（一次性构建; 新增别名只需在此加一行）
-declare -A PROTOCOL_ALIAS=(
+# 注意必须用 -g: 本文件被 install.sh/入口脚本的 load() 函数内 source 时,
+# 顶层 declare 不加 -g 会变成 load() 的局部变量, 函数返回即丢失
+declare -gA PROTOCOL_ALIAS=(
     [ws]=VMess-WS [tcp]=VMess-TCP [quic]=VMess-QUIC [http]=VMess-HTTP
     [wss]=VMess-WS-TLS [h2]=VMess-H2-TLS [hu]=VMess-HTTPUpgrade-TLS
     [vws]=VLESS-WS-TLS [vh2]=VLESS-H2-TLS [vhu]=VLESS-HTTPUpgrade-TLS
@@ -157,7 +159,8 @@ get_ip() {
 : "${DNS_API:=https://one.one.one.one/dns-query}"
 
 # 派生表与随机默认值（在 script.conf 之后构建, 覆盖 ss_method_list/servername_list 即可生效）
-declare -A SS_METHOD_ALIAS
+# 同上: -g 保证在 load() 函数内 source 时仍是全局
+declare -gA SS_METHOD_ALIAS
 for m in "${ss_method_list[@]}"; do SS_METHOD_ALIAS[${m,,}]=$m; done
 is_random_ss_method=${ss_method_2022[$(shuf -i 0-$((${#ss_method_2022[@]} - 1)) -n1)]} # random only use ss2022
 is_random_servername=${servername_list[$(shuf -i 0-$((${#servername_list[@]} - 1)) -n1)]}

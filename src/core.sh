@@ -37,9 +37,6 @@ ss_method_legacy=(
     xchacha20-ietf-poly1305
 )
 ss_method_list=("${ss_method_2022[@]}" "${ss_method_legacy[@]}")
-# 加密方式大小写不敏感匹配表（一次性构建）
-declare -A SS_METHOD_ALIAS
-for m in "${ss_method_list[@]}"; do SS_METHOD_ALIAS[${m,,}]=$m; done
 mainmenu=(
     "添加配置"
     "更改配置"
@@ -49,32 +46,6 @@ mainmenu=(
     "更新"
     "卸载"
     "其他"
-)
-info_list=(
-    "协议 (protocol)"
-    "地址 (address)"
-    "端口 (port)"
-    "用户ID (id)"
-    "传输协议 (network)"
-    "伪装类型 (type)"
-    "伪装域名 (host)"
-    "路径 (path)"
-    "传输层安全 (TLS)"
-    "应用层协议协商 (Alpn)"
-    "密码 (password)"
-    "加密方式 (encryption)"
-    "链接 (URL)"
-    "目标地址 (remote addr)"
-    "目标端口 (remote port)"
-    "流控 (flow)"
-    "SNI (serverName)"
-    "指纹 (Fingerprint)"
-    "公钥 (Public key)"
-    "用户名 (Username)"
-    "跳过证书验证 (allowInsecure)"
-    "拥塞控制算法 (congestion_control)"
-    "出口IP (bind address)"
-    "进口IP (listen)"
 )
 change_list=(
     "更改协议"
@@ -100,6 +71,16 @@ servername_list=(
     dash.cloudflare.com
     aws.amazon.com
 )
+# 协议别名表（一次性构建; 新增别名只需在此加一行）
+declare -A PROTOCOL_ALIAS=(
+    [ws]=VMess-WS [tcp]=VMess-TCP [quic]=VMess-QUIC [http]=VMess-HTTP
+    [wss]=VMess-WS-TLS [h2]=VMess-H2-TLS [hu]=VMess-HTTPUpgrade-TLS
+    [vws]=VLESS-WS-TLS [vh2]=VLESS-H2-TLS [vhu]=VLESS-HTTPUpgrade-TLS
+    [tws]=Trojan-WS-TLS [th2]=Trojan-H2-TLS [thu]=Trojan-HTTPUpgrade-TLS
+    [r]=VLESS-REALITY [reality]=VLESS-REALITY [rh2]=VLESS-HTTP2-REALITY
+    [ss]=Shadowsocks [door]=Direct [direct]=Direct [tuic]=TUIC
+    [hy]=Hysteria2 [hy2]=Hysteria2 [anytls]=AnyTLS [socks]=Socks [trojan]=Trojan
+)
 
 # shuf fallback for systems without shuf (e.g., Alpine BusyBox)
 if ! type -P shuf &>/dev/null; then
@@ -111,12 +92,10 @@ if ! type -P shuf &>/dev/null; then
             -n) n=$2; shift 2 ;;
             esac
         done
+        [[ $max ]] || return 1 # 未传 -i 时不做除零运算
         echo $(( RANDOM % (max - min + 1) + min ))
     }
 fi
-
-is_random_ss_method=${ss_method_2022[$(shuf -i 0-$((${#ss_method_2022[@]} - 1)) -n1)]} # random only use ss2022
-is_random_servername=${servername_list[$(shuf -i 0-$((${#servername_list[@]} - 1)) -n1)]}
 
 msg() {
     echo -e "$@"
@@ -124,6 +103,16 @@ msg() {
 
 msg_ul() {
     echo -e "\e[4m$@\e[0m"
+}
+
+# 按固定列宽打印 "标签=值" 信息行 (代替 info_list + 数字索引 + tab 宽度 hack)
+show_info() {
+    local kv label val
+    for kv in "$@"; do
+        label=${kv%%=*}
+        val=${kv#*=}
+        printf "%-24s= \e[${is_color}m%s\e[0m\n" "$label" "$val"
+    done
 }
 
 print_no_auto_tls_hint() {
@@ -154,7 +143,8 @@ get_ip() {
 # ====================== 可定制配置区 ======================
 # 独立运行守卫（防止 core.sh 被直接 bash 时 is_core 尚未赋值）
 : "${is_core:=sing-box}"
-# 用户自定义覆盖（可选，在默认值之前读取以便覆盖）
+# 用户自定义覆盖（可选）: 可覆盖下方默认值以及上方列表变量（ss_method_list 等）
+# 覆盖示例: echo 'PORT_MIN=10000' > /etc/$is_core/script.conf
 [[ -f /etc/$is_core/script.conf ]] && . /etc/$is_core/script.conf
 # 默认值（若未被 script.conf 覆盖）
 : "${PORT_MIN:=445}"
@@ -165,6 +155,12 @@ get_ip() {
 : "${LOG_PATH:=/var/log/$is_core/access.log}"
 : "${IP_API:=https://one.one.one.one/cdn-cgi/trace}"
 : "${DNS_API:=https://one.one.one.one/dns-query}"
+
+# 派生表与随机默认值（在 script.conf 之后构建, 覆盖 ss_method_list/servername_list 即可生效）
+declare -A SS_METHOD_ALIAS
+for m in "${ss_method_list[@]}"; do SS_METHOD_ALIAS[${m,,}]=$m; done
+is_random_ss_method=${ss_method_2022[$(shuf -i 0-$((${#ss_method_2022[@]} - 1)) -n1)]} # random only use ss2022
+is_random_servername=${servername_list[$(shuf -i 0-$((${#servername_list[@]} - 1)) -n1)]}
 # =========================================================
 
 get_port() {
@@ -188,18 +184,16 @@ get_pbk() {
 }
 
 # build the json fragment to bind the outbound to a specified IP (IPv4/IPv6)
-# bind_interface is only added when an interface is explicitly set
+# 片段内使用 $bind_ip 引用, 由 create server 统一 --arg bind_ip 注入
 set_bind_json() {
-    is_bind_json=
     is_bind_json_addr=
     [[ $is_bind_ip ]] && {
         if [[ $is_bind_ip =~ : ]]; then
-            is_bind_json_addr=",inet6_bind_address:\"$is_bind_ip\""
+            is_bind_json_addr=",inet6_bind_address:\$bind_ip"
         else
-            is_bind_json_addr=",inet4_bind_address:\"$is_bind_ip\""
+            is_bind_json_addr=",inet4_bind_address:\$bind_ip"
         fi
     }
-    is_bind_json="$is_bind_json_addr"
 }
 
 # validate IPv4 / IPv6 address format (loose check)
@@ -239,6 +233,27 @@ validate_path() {
     return 1
 }
 
+# ask_value 用的校验包装器 (校验函数需显式传入, 不再按变量名嗅探)
+v_port() { validate_port "$1" ask; }
+v_port_door() { validate_port "$1" door; }
+
+# 判断 is_core_ver 是否 >= 指定版本 (用法: core_at_least 1.12.0)
+core_at_least() {
+    local have=${is_core_ver#v} want=${1#v}
+    local -a h w
+    IFS=. read -ra h <<<"$have"
+    IFS=. read -ra w <<<"$want"
+    local i
+    for i in 0 1 2; do
+        (( ${h[i]:-0} > ${w[i]:-0} )) && return 0
+        (( ${h[i]:-0} < ${w[i]:-0} )) && return 1
+    done
+    return 0
+}
+
+# change 分支统一的不支持提示 (文案取自 change_list)
+unsupported() { err "($is_config_file) 不支持$1."; }
+
 # extracted utility helpers (reusable, no change to existing flows)
 
 bracket_v6() { [[ $1 == *:* && $1 != \[* ]] && echo "[$1]" || echo "$1"; }
@@ -251,7 +266,11 @@ _test_run_one() {
         manage start $svc &>/dev/null
         if [[ $is_run_fail == $svc ]]; then
             _red "$name 运行失败信息:"
-            [[ $cfg ]] && "$bin" run $cfg || "$bin" run --config "$is_caddyfile"
+            if [[ $cfg ]]; then
+                "$bin" run $cfg # cfg 为整串参数, 此处有意保留分词
+            else
+                "$bin" run --config "$is_caddyfile"
+            fi
         else
             _green "\n测试通过, 已启动 $name ..\n"
         fi
@@ -260,17 +279,12 @@ _test_run_one() {
     fi
 }
 
-get_ip_type() {
-    [[ $1 == *:* ]] && echo ipv6 || echo ipv4
-}
-
-jq_safe() {
-    jq -r "$1 // empty" "$2" 2>/dev/null
-}
-
 _wait_core_alive() {
-    sleep 2
-    [[ $(pgrep -f $is_run_bin) ]] && return 0
+    local i
+    for ((i = 0; i < 25; i++)); do # 轮询最多 5 秒, 避免固定 sleep 在慢机上误报、快机上白等
+        pgrep -f "$is_run_bin" &>/dev/null && return 0
+        sleep 0.2
+    done
     is_run_fail=${is_do_name_msg,,}
     [[ ! $is_no_manage_msg ]] && {
         msg
@@ -280,6 +294,44 @@ _wait_core_alive() {
         _yellow "测试结束, 请按 Enter 退出."
     }
     return 1
+}
+
+# 从配置文件提取字段到全局变量 (key=value 形式, 顺序无关, 值可含空格/=)
+load_config_vars() {
+    local f=$is_conf_dir/$1 data k v
+    # 复位上次加载的字段, 避免串配置
+    unset is_protocol port is_listen_ip uuid password username ss_method ss_password \
+        door_port door_addr net_type path host is_servername is_private_key \
+        is_public_key is_bind_ip
+    data=$(jq -r '
+        def p($k;$v): if $v == null then empty else "\($k)=\($v|tostring)" end;
+        .inbounds[0] as $i |
+        p("is_protocol";    $i.type),
+        p("port";           $i.listen_port),
+        p("is_listen_ip";   $i.listen),
+        p("uuid";           $i.users[0].uuid),
+        p("password";       $i.users[0].password // $i.password),
+        p("username";       $i.users[0].username),
+        p("ss_method";      $i.method),
+        p("door_port";      $i.override_port),
+        p("door_addr";      $i.override_address),
+        p("net_type";       $i.transport.type),
+        p("path";           $i.transport.path),
+        p("host";           $i.transport.headers.host),
+        p("is_servername";  $i.tls.server_name),
+        p("is_private_key"; $i.tls.reality.private_key),
+        p("is_public_key";  .outbounds[1].tag),
+        p("is_bind4";       .outbounds[0].inet4_bind_address),
+        p("is_bind6";       .outbounds[0].inet6_bind_address)
+    ' "$f" 2>/dev/null) || err "无法读取此文件: $1"
+    while IFS='=' read -r k v; do
+        [[ $v == null || -z $v ]] && continue
+        case $k in
+        is_bind4 | is_bind6) is_bind_ip=$v ;;
+        *)                   printf -v "$k" '%s' "$v" ;;
+        esac
+    done <<<"$data"
+    is_loaded_info=1 # 标记: 已从配置文件加载过字段 (get protocol 的 vmess-tcp 分支依赖此标记)
 }
 
 # rebuild route rules into the MAIN config.json.
@@ -318,10 +370,8 @@ show_list() {
 is_test() {
     local v=$2
     case $1 in
-    number)     [[ $v =~ ^[1-9][0-9]*$ ]] ;;
     port)       [[ $v =~ ^[0-9]+$ ]] && (( 10#$v >= 1 && 10#$v <= 65535 )) ;;
     port_used)  is_port_used "$v" && [[ ! $is_cant_test_port ]] ;;
-    domain)     [[ $v =~ ^[[:alnum:]]([[:alnum:]_-]*\.)+[[:alpha:]]+$ ]] ;;
     path)       [[ $v =~ ^/[[:alnum:]_./-]+$ ]] ;;
     uuid)       [[ $v =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]] ;;
     esac
@@ -345,91 +395,73 @@ is_port_used() {
     grep -qx "$port" <<<"$is_used_port"
 }
 
-# ask input a string or pick a option for list.
-ask() {
-    local i v a tt o
-    case $1 in
-    set_ss_method)
-        is_tmp_list=("${ss_method_list[@]}")
-        is_default_arg=$is_random_ss_method
-        is_opt_msg="\n请选择加密方式:\n"
-        is_opt_input_msg="(默认\e[92m $is_default_arg\e[0m):"
-        is_ask_set=ss_method
-        ;;
-    set_protocol)
-        is_tmp_list=("${protocol_list[@]}")
-        [[ $is_no_auto_tls ]] && {
-            unset is_tmp_list
-        for v in "${protocol_list[@]}"; do
-            [[ ${v,,} =~ -tls$ ]] && is_tmp_list=("${is_tmp_list[@]}" "$v")
-            done
-        }
-        is_opt_msg="\n请选择协议:\n"
-        is_ask_set=is_new_protocol
-        ;;
-    set_change_list)
-        is_tmp_list=()
-        for v in "${is_can_change[@]}"; do
-            is_tmp_list+=("${change_list[$v]}")
-        done
-        is_opt_msg="\n请选择更改:\n"
-        is_ask_set=is_change_str
-        is_opt_input_msg=$3
-        [[ $is_default_arg ]] && is_opt_input_msg="请选择 [\e[91m1-${#is_tmp_list[@]}\e[0m] (默认\e[92m $is_default_arg\e[0m)]:"
-        ;;
-    string)
-        is_ask_set=$2
-        is_opt_input_msg=$3
-        ;;
-    list)
-        is_ask_set=$2
-        [[ ! $is_tmp_list ]] && is_tmp_list=($3)
-        is_opt_msg=$4
-        is_opt_input_msg=$5
-        ;;
-    get_config_file)
-        is_tmp_list=("${is_all_json[@]}")
-        is_opt_msg="\n请选择配置:\n"
-        is_ask_set=is_config_file
-        ;;
-    mainmenu)
-        is_tmp_list=("${mainmenu[@]}")
-        is_ask_set=is_main_pick
-        is_emtpy_exit=1
-        ;;
-    esac
-    msg $is_opt_msg
-    [[ ! $is_opt_input_msg ]] && is_opt_input_msg="请选择 [\e[91m1-${#is_tmp_list[@]}\e[0m]:"
-    [[ $is_tmp_list ]] && show_list "${is_tmp_list[@]}"
-    while :; do
-        echo -ne $is_opt_input_msg
-        read REPLY
-        [[ ! $REPLY && $is_emtpy_exit ]] && exit
-        [[ ! $REPLY && $is_default_arg ]] && export $is_ask_set=$is_default_arg && break
-        if [[ ! $is_tmp_list ]]; then
-            [[ $is_ask_set == *port* ]] && {
-                if [[ $is_ask_set == 'door_port' ]]; then
-                    validate_port "$REPLY" door || { msg "$is_err $VALIDATE_ERR"; continue; }
-                else
-                    validate_port "$REPLY" ask || { msg "$is_err $VALIDATE_ERR"; continue; }
-                fi
-            }
-            [[ $is_ask_set == *path* ]] && { validate_path "$REPLY" || { msg "$is_err $VALIDATE_ERR"; continue; } }
-            [[ $is_ask_set == *uuid* ]] && { validate_uuid "$REPLY" || { msg "$is_err $VALIDATE_ERR"; continue; } }
-            [[ $is_ask_set == [Yy] ]] && {
-                [[ $REPLY =~ ^[Yy]$ ]] && break
-                msg "请输入 (y)"
-                continue
-            }
-            [[ $REPLY ]] && export $is_ask_set=$REPLY && msg "使用: ${!is_ask_set}" && break
-        else
-            is_test number "$REPLY" && is_ask_result=${is_tmp_list[$REPLY - 1]}
-            [[ $is_ask_result ]] && export $is_ask_set="$is_ask_result" && msg "选择: ${!is_ask_set}" && break
-        fi
+# ======================== 交互原语 ========================
+# 用 printf -v 回写调用方变量 (兼容 bash 4.2, 不用 nameref), 校验函数显式传入
 
+# 字符串输入: $1=变量名 $2=提示语 $3=默认值(空输入时使用; 传空则重新输入) $4=校验函数(可选, 失败读 VALIDATE_ERR)
+ask_value() {
+    local var=$1 prompt=$2 def=$3 check=$4 input
+    while :; do
+        echo -ne "$prompt"
+        read -r input
+        [[ -z $input && $def ]] && input=$def
+        [[ -z $input ]] && continue
+        if [[ ! $check ]] || "$check" "$input"; then
+            printf -v "$var" '%s' "$input"
+            msg "使用: ${!var}"
+            return 0
+        fi
+        msg "$is_err $VALIDATE_ERR"
+    done
+}
+
+# 列表选择: $1=值变量 $2=序号变量(""=不写) $3=标题(""=不打印) $4=输入提示(""=默认) $5=默认值
+#   $5 传 "exit" → 空输入退出脚本 (主菜单用); 传其他值 → 空输入取该默认值; 传空 → 空输入重新输入
+# 其余参数 = 选项列表
+ask_menu() {
+    local val_var=$1 idx_var=$2 title=$3 prompt=$4 def=$5
+    shift 5
+    local opts=("$@") pick i
+    [[ $title ]] && msg "$title"
+    show_list "${opts[@]}"
+    [[ ! $prompt ]] && prompt="请选择 [\e[91m1-${#opts[@]}\e[0m]:"
+    while :; do
+        echo -ne "$prompt"
+        read -r pick
+        if [[ -z $pick ]]; then
+            if [[ $def == exit ]]; then
+                exit
+            elif [[ $def ]]; then
+                printf -v "$val_var" '%s' "$def"
+                if [[ $idx_var ]]; then
+                    for i in "${!opts[@]}"; do
+                        [[ ${opts[i]} == "$def" ]] && printf -v "$idx_var" '%s' "$((i + 1))" && break
+                    done
+                fi
+                msg "选择: $def"
+                return 0
+            fi
+            continue
+        fi
+        if [[ $pick =~ ^[0-9]+$ ]] && (( 10#$pick >= 1 && 10#$pick <= ${#opts[@]} )); then
+            printf -v "$val_var" '%s' "${opts[10#$pick - 1]}"
+            [[ $idx_var ]] && printf -v "$idx_var" '%s' "$((10#$pick))"
+            msg "选择: ${!val_var}"
+            return 0
+        fi
         msg "输入${is_err}"
     done
-    unset is_opt_msg is_opt_input_msg is_tmp_list is_ask_result is_default_arg is_emtpy_exit
+}
+
+# y 确认: 输入 y 直到确认
+confirm() {
+    local r
+    while :; do
+        echo -ne "$1"
+        read -r r
+        [[ $r =~ ^[Yy]$ ]] && return 0
+        msg "请输入 (y)"
+    done
 }
 
 # create file
@@ -462,10 +494,9 @@ select_local_ip() {
     }
     [[ $(type -P hostname) ]] && is_local_ips+=($(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^127\.0\.0\.1$'))
     [[ ${#is_local_ips[@]} -gt 0 ]] && is_local_ips=($(printf '%s\n' "${is_local_ips[@]}" | awk '!seen[$0]++'))
-    [[ ${#is_local_ips[@]} -eq 0 ]] && { eval "$var="; return 1; }
+    [[ ${#is_local_ips[@]} -eq 0 ]] && { printf -v "$var" ''; return 1; }
     is_tmp_list=("${is_local_ips[@]}")
-    is_default_arg=${is_tmp_list[0]}
-    ask list "$var" "" "$prompt" "请选择序号 [1-${#is_tmp_list[@]}], 回车选择第一项(${is_default_arg}):"
+    ask_menu "$var" "" "$prompt" "请选择序号 [1-${#is_tmp_list[@]}], 回车选择第一项(${is_tmp_list[0]}):" "${is_tmp_list[0]}" "${is_tmp_list[@]}"
 }
 
 # ======================== 配置创建 ========================
@@ -482,11 +513,29 @@ create() {
         [[ $net == "reality" ]] && {
             set_bind_json
             # 约定：reality 公钥藏入一个假 outbound 的 tag（public_key_<key>），
-        # 其读回逻辑见 get info（is_public_key=${is_public_key/public_key_/}）与
-        # build_route_json 的 ^direct_[0-9]+$ 过滤。
-        is_add_public_key=",outbounds:[{tag:\"direct_$port\",type:\"direct\"${is_bind_json}},{tag:\"public_key_$is_public_key\",type:\"direct\"}]"
+            # 读回逻辑见 load_config_vars（is_public_key=${is_public_key/public_key_/}），
+            # 并依赖 build_route_json 的 ^direct_[0-9]+$ 过滤不误伤该 outbound。
+            is_add_public_key=",outbounds:[{tag:\"direct_$port\",type:\"direct\"${is_bind_json_addr}},{tag:\"public_key_$is_public_key\",type:\"direct\"}]"
         } || is_add_public_key=
-        is_new_json=$(jq "{inbounds:[{tag:\"$is_config_name\",type:\"$is_protocol\",$is_listen,listen_port:$port,$json_str}]$is_add_public_key}" <<<{})
+        # 用户可控值一律走 --arg 注入, 片段内只允许出现 $var 引用, 杜绝转义/注入问题
+        is_new_json=$(jq \
+            --arg tag "$is_config_name" \
+            --arg uuid "$uuid" \
+            --arg password "$password" \
+            --arg ss_method "$ss_method" \
+            --arg ss_password "$ss_password" \
+            --arg path "$path" \
+            --arg host "$host" \
+            --arg servername "$is_servername" \
+            --arg private_key "$is_private_key" \
+            --arg door_addr "$door_addr" \
+            --arg socks_user "$is_socks_user" \
+            --arg socks_pass "$is_socks_pass" \
+            --arg anytls_domain "$is_anytls_domain" \
+            --arg tls_key "$is_tls_key" \
+            --arg tls_cer "$is_tls_cer" \
+            --arg bind_ip "$is_bind_ip" \
+            "{inbounds:[{tag:\$tag,type:\"$is_protocol\",$is_listen,listen_port:$port,$json_str}]$is_add_public_key}" <<<{})
         [[ $is_test_json ]] && return # tmp test
         # only show json, dont save to file.
         [[ $is_gen ]] && {
@@ -499,6 +548,7 @@ create() {
         [[ $is_config_file ]] && is_no_del_msg=1 && del $is_config_file
         # save json to file
         cat <<<$is_new_json >"$is_json_file"
+        unset is_used_port # 新端口已占用, 失效端口占用缓存
         if [[ $is_new_install ]]; then
             create config.json
         fi
@@ -523,24 +573,25 @@ create() {
     caddy)
         load caddy.sh
         [[ $is_install_caddy ]] && caddy_config new
-        [[ ! $(grep "$is_caddy_conf" $is_caddyfile) ]] && {
-            msg "import $is_caddy_conf/*.conf" >>$is_caddyfile
+        grep -q "$is_caddy_conf" "$is_caddyfile" 2>/dev/null || {
+            msg "import $is_caddy_conf/*.conf" >>"$is_caddyfile"
         }
-        [[ ! -d $is_caddy_conf ]] && mkdir -p $is_caddy_conf
+        [[ ! -d $is_caddy_conf ]] && mkdir -p "$is_caddy_conf"
         caddy_config $2
-        manage restart caddy &
+        manage_bg restart caddy
         ;;
     config.json)
-        is_log='log:{output:"'$LOG_PATH'",level:"info","timestamp":true}'
-        is_dns='dns:{}'
-        is_ntp='ntp:{"enabled":true,"server":"'$NTP_SERVER'"},'
+        # 已有配置: 仅当 .ntp.enabled=true 时保留 ntp; 新配置: 仅在安装期 NTP 不可用时写入
+        is_ntp=
         if [[ -f $is_config_json ]]; then
-            [[ $(jq .ntp.enabled $is_config_json) != "true" ]] && is_ntp=
-        else
-            [[ ! $is_ntp_on ]] && is_ntp=
+            [[ $(jq .ntp.enabled "$is_config_json" 2>/dev/null) == "true" ]] && is_ntp=',ntp:{enabled:true,server:$ntp_server}'
+        elif [[ $is_ntp_on ]]; then
+            is_ntp=',ntp:{enabled:true,server:$ntp_server}'
         fi
-        is_outbounds='outbounds:[{tag:"direct",type:"direct"}]'
-        is_server_config_json=$(jq "{$is_log,$is_dns,$is_ntp$is_outbounds}" <<<{})
+        is_server_config_json=$(jq -n \
+            --arg log_path "$LOG_PATH" \
+            --arg ntp_server "$NTP_SERVER" \
+            "{log:{output:\$log_path,level:\"info\",timestamp:true},outbounds:[{tag:\"direct\",type:\"direct\"}]$is_ntp}")
         cat <<<$is_server_config_json >"$is_config_json"
         manage_bg restart
         ;;
@@ -550,7 +601,7 @@ create() {
 # change config file
 # ======================== 配置修改 ========================
 change() {
-    local i v a tt o
+    local v
     is_change=1
     is_dont_show_info=1
     if [[ $2 ]]; then
@@ -578,10 +629,13 @@ change() {
     is_dont_show_info=
     # if not prefer args, show change list and then get change id.
     [[ ! $is_change_id ]] && {
-        [[ $is_reality ]] && is_default_arg=1
-        is_emtpy_exit=
-        ask set_change_list
-        [[ ! $REPLY ]] && is_change_id=${is_can_change[0]} || is_change_id=${is_can_change[$REPLY - 1]}
+        is_change_opts=()
+        for v in "${is_can_change[@]}"; do
+            is_change_opts+=("${change_list[$v]}")
+        done
+        [[ $is_reality ]] && is_change_def="${is_change_opts[0]}" || is_change_def=
+        ask_menu is_change_str change_pick "\n请选择更改:\n" "" "$is_change_def" "${is_change_opts[@]}"
+        [[ $change_pick ]] && is_change_id=${is_can_change[change_pick - 1]} || is_change_id=${is_can_change[0]}
     }
     case $is_change_id in
     0)
@@ -592,37 +646,37 @@ change() {
     1)
         # new port
         is_new_port=$3
-        [[ $host && ! $is_caddy || $is_no_auto_tls ]] && err "($is_config_file) 不支持更改端口, 因为没啥意义."
+        [[ ( $host && ! $is_caddy ) || $is_no_auto_tls ]] && err "($is_config_file) 不支持更改端口, 因为没啥意义."
         if [[ $is_new_port && ! $is_auto ]]; then
             validate_port "$is_new_port" change || err "$VALIDATE_ERR"
         fi
         [[ $is_auto ]] && get_port && is_new_port=$tmp_port
-        [[ ! $is_new_port ]] && ask string is_new_port "请输入新端口:"
+        [[ ! $is_new_port ]] && ask_value is_new_port "请输入新端口:" "" v_port
         if [[ $is_caddy && $host ]]; then
             net=$is_old_net
             is_https_port=$is_new_port
             load caddy.sh
             caddy_config $net
-        manage_bg restart caddy
+            manage_bg restart caddy
             info
         else
             add $net $is_new_port
         fi
         ;;
-    2)
-        # new host
+    2 | 11)
+        # new host / new host (伪装网站): 两分支逻辑相同, 报错文案取自 change_list
         is_new_host=$3
-        [[ ! $host ]] && err "($is_config_file) 不支持更改域名."
-        [[ ! $is_new_host ]] && ask string is_new_host "请输入新域名:"
+        [[ ! $host ]] && unsupported "${change_list[$is_change_id]}"
+        [[ ! $is_new_host ]] && ask_value is_new_host "请输入新域名:"
         old_host=$host # del old host
         add $net $is_new_host
         ;;
     3)
         # new path
         is_new_path=$3
-        [[ ! $path ]] && err "($is_config_file) 不支持更改路径."
+        [[ ! $path ]] && unsupported "${change_list[$is_change_id]}"
         [[ $is_auto ]] && get_uuid && is_new_path=/$tmp_uuid
-        [[ ! $is_new_path ]] && ask string is_new_path "请输入新路径:"
+        [[ ! $is_new_path ]] && ask_value is_new_path "请输入新路径:" "" validate_path
         add $net auto auto $is_new_path
         ;;
     4)
@@ -634,9 +688,9 @@ change() {
                 [[ $ss_password ]] && is_new_pass=$(get ss2022)
             }
         else
-            err "($is_config_file) 不支持更改密码."
+            unsupported "${change_list[$is_change_id]}"
         fi
-        [[ ! $is_new_pass ]] && ask string is_new_pass "请输入新密码:"
+        [[ ! $is_new_pass ]] && ask_value is_new_pass "请输入新密码:"
         password=$is_new_pass
         ss_password=$is_new_pass
         is_socks_pass=$is_new_pass
@@ -645,18 +699,18 @@ change() {
     5)
         # new uuid
         is_new_uuid=$3
-        [[ ! $uuid ]] && err "($is_config_file) 不支持更改 UUID."
+        [[ ! $uuid ]] && unsupported "${change_list[$is_change_id]}"
         [[ $is_auto ]] && get_uuid && is_new_uuid=$tmp_uuid
-        [[ ! $is_new_uuid ]] && ask string is_new_uuid "请输入新 UUID:"
+        [[ ! $is_new_uuid ]] && ask_value is_new_uuid "请输入新 UUID:" "" validate_uuid
         add $net auto $is_new_uuid
         ;;
     6)
         # new method
         is_new_method=$3
-        [[ $net != 'ss' ]] && err "($is_config_file) 不支持更改加密方式."
+        [[ $net != 'ss' ]] && unsupported "${change_list[$is_change_id]}"
         [[ $is_auto ]] && is_new_method=$is_random_ss_method
         [[ ! $is_new_method ]] && {
-            ask set_ss_method
+            ask_menu ss_method "" "\n请选择加密方式:\n" "(默认\e[92m $is_random_ss_method\e[0m):" "$is_random_ss_method" "${ss_method_list[@]}"
             is_new_method=$ss_method
         }
         add $net auto auto $is_new_method
@@ -664,17 +718,17 @@ change() {
     7)
         # new remote addr
         is_new_door_addr=$3
-        [[ $net != 'direct' ]] && err "($is_config_file) 不支持更改目标地址."
-        [[ ! $is_new_door_addr ]] && ask string is_new_door_addr "请输入新的目标地址:"
+        [[ $net != 'direct' ]] && unsupported "${change_list[$is_change_id]}"
+        [[ ! $is_new_door_addr ]] && ask_value is_new_door_addr "请输入新的目标地址:"
         door_addr=$is_new_door_addr
         add $net
         ;;
     8)
         # new remote port
         is_new_door_port=$3
-        [[ $net != 'direct' ]] && err "($is_config_file) 不支持更改目标端口."
+        [[ $net != 'direct' ]] && unsupported "${change_list[$is_change_id]}"
         [[ ! $is_new_door_port ]] && {
-            ask string door_port "请输入新的目标端口:"
+            ask_value door_port "请输入新的目标端口:" "" v_port_door
             is_new_door_port=$door_port
         }
         add $net auto auto $is_new_door_port
@@ -691,8 +745,8 @@ change() {
             [[ $is_new_private_key && ! $is_new_public_key ]] && {
                 err "无法找到 Public key."
             }
-            [[ ! $is_new_private_key ]] && ask string is_new_private_key "请输入新 Private key:"
-            [[ ! $is_new_public_key ]] && ask string is_new_public_key "请输入新 Public key:"
+            [[ ! $is_new_private_key ]] && ask_value is_new_private_key "请输入新 Private key:"
+            [[ ! $is_new_public_key ]] && ask_value is_new_public_key "请输入新 Public key:"
             if [[ $is_new_private_key == $is_new_public_key ]]; then
                 err "Private key 和 Public key 不能一样."
             fi
@@ -720,29 +774,21 @@ change() {
     10)
         # new serverName
         is_new_servername=$3
-        [[ ! $is_reality ]] && err "($is_config_file) 不支持更改 serverName."
+        [[ ! $is_reality ]] && unsupported "${change_list[$is_change_id]}"
         [[ $is_auto ]] && is_new_servername=$is_random_servername
-        [[ ! $is_new_servername ]] && ask string is_new_servername "请输入新的 serverName:"
+        [[ ! $is_new_servername ]] && ask_value is_new_servername "请输入新的 serverName:"
         is_servername=$is_new_servername
         add $net
         ;;
-    11)
-        # new host (伪装网站)
-        is_new_host=$3
-        [[ ! $host ]] && err "($is_config_file) 不支持更改伪装网站."
-        [[ ! $is_new_host ]] && ask string is_new_host "请输入新伪装网站域名:"
-        old_host=$host
-        add $net $is_new_host
-        ;;
     12)
         # new socks user
-        [[ ! $is_socks_user ]] && err "($is_config_file) 不支持更改用户名 (Username)."
-        ask string is_socks_user "请输入新用户名 (Username):"
+        [[ ! $is_socks_user ]] && unsupported "${change_list[$is_change_id]}"
+        ask_value is_socks_user "请输入新用户名 (Username):"
         add $net
         ;;
     13)
         # 更改端口 / 进口IP / 出口IP (combined network settings)
-        [[ ! $is_reality ]] && err "($is_config_file) 不支持此更改."
+        [[ ! $is_reality ]] && unsupported "此更改"
         # 1) 新端口
         is_new_port=$3
         if [[ $is_new_port && ! $is_auto ]]; then
@@ -750,15 +796,9 @@ change() {
         fi
         [[ ! $is_new_port ]] && {
             [[ $is_auto ]] && get_port && is_new_port=$tmp_port
-            [[ ! $is_new_port ]] && {
-                is_default_arg=$port
-                ask string is_new_port "请输入新端口 (当前: $port, 回车保持):"
-                [[ $is_new_port && $is_new_port != $port ]] && {
-                    validate_port "$is_new_port" change || err "$VALIDATE_ERR"
-                }
-            }
+            [[ ! $is_new_port ]] && ask_value is_new_port "请输入新端口 (当前: $port, 回车保持):" "$port" v_port
         }
-        [[ $is_new_port ]] && port=$is_new_port
+        [[ $is_new_port && $is_new_port != $port ]] && port=$is_new_port
         # 2) 新进口IP (inbound listen)
         select_local_ip "\n请选择进口 IP (本机可用地址):\n" is_new_listen_ip
         is_listen_ip=$is_new_listen_ip
@@ -776,7 +816,6 @@ change() {
 # delete config.
 # ======================== 配置删除 ========================
 del() {
-    local i v a tt o
     # dont get ip
     is_dont_get_ip=1
     [[ $is_conf_dir_empty ]] && return # not found any json file.
@@ -787,19 +826,16 @@ del() {
             msg "\n是否删除配置文件?: $is_config_file"
             pause
         fi
-        rm -rf $is_conf_dir/"$is_config_file"
+        rm -rf "$is_conf_dir/$is_config_file"
         [[ ! $is_new_json ]] && build_route_json
         [[ ! $is_new_json ]] && manage_bg restart
         [[ ! $is_no_del_msg ]] && _green "\n已删除: $is_config_file\n"
 
         [[ $is_caddy ]] && {
             is_del_host=$host
-            [[ $is_change ]] && {
-                [[ ! $old_host ]] && is_del_host=
-                is_del_host=$old_host
-            }
-            [[ $is_del_host && $host != $old_host && -f $is_caddy_conf/$is_del_host.conf ]] && {
-                rm -rf $is_caddy_conf/$is_del_host.conf $is_caddy_conf/$is_del_host.conf.add
+            [[ $is_change ]] && is_del_host=$old_host # 换域名场景删除旧域名的 caddy 配置; old_host 为空则跳过
+            [[ $is_del_host && $host != $old_host && -f "$is_caddy_conf/$is_del_host.conf" ]] && {
+                rm -rf "$is_caddy_conf/$is_del_host.conf" "$is_caddy_conf/$is_del_host.conf.add"
                 [[ ! $is_new_json ]] && manage_bg restart caddy
             }
         }
@@ -815,10 +851,9 @@ del() {
 # uninstall
 uninstall() {
     if [[ $is_caddy ]]; then
-        is_tmp_list=("卸载 $is_core_name" "卸载 ${is_core_name} & Caddy")
-        ask list is_do_uninstall
+        ask_menu is_do_uninstall uninstall_pick "" "" "" "卸载 $is_core_name" "卸载 ${is_core_name} & Caddy"
     else
-        ask string y "是否卸载 ${is_core_name}? [y]:"
+        confirm "是否卸载 ${is_core_name}? [y]:"
     fi
     manage stop &>/dev/null
     manage disable &>/dev/null
@@ -829,14 +864,14 @@ uninstall() {
         rm -f /etc/init.d/$is_core
     fi
     sed -i -e "/^alias sb=/d" -e "/^alias ${is_core}=/d" /root/.bashrc
-    # uninstall caddy; 2 is ask result
-    if [[ $REPLY == '2' ]]; then
+    # uninstall caddy; uninstall_pick 2 = 卸载 core & Caddy
+    if [[ $uninstall_pick == 2 ]]; then
         manage stop caddy &>/dev/null
         manage disable caddy &>/dev/null
         if [[ $is_systemd ]]; then
-            rm -rf $is_caddy_dir $is_caddy_bin /lib/systemd/system/caddy.service
+            rm -rf "$is_caddy_dir" "$is_caddy_bin" /lib/systemd/system/caddy.service
         elif [[ $is_openrc ]]; then
-            rm -rf $is_caddy_dir $is_caddy_bin /etc/init.d/caddy
+            rm -rf "$is_caddy_dir" "$is_caddy_bin" /etc/init.d/caddy
         fi
     fi
     [[ $is_install_sh ]] && return # reinstall
@@ -848,7 +883,6 @@ uninstall() {
 # manage run status
 manage_bg() { manage "$@" & }
 manage() {
-    local i v a tt o
     [[ $is_dont_auto_exit ]] && return
     case $1 in
     1 | start)
@@ -903,43 +937,37 @@ manage() {
 # add a config
 # ======================== 配置添加 ========================
 add() {
-    local i v a tt o
+    local v
     is_lower=${1,,}
     if [[ $is_lower ]]; then
-        declare -A protocol_alias=(
-            [ws]=VMess-WS [tcp]=VMess-TCP [quic]=VMess-QUIC [http]=VMess-HTTP
-            [wss]=VMess-WS-TLS [h2]=VMess-H2-TLS [hu]=VMess-HTTPUpgrade-TLS
-            [vws]=VLESS-WS-TLS [vh2]=VLESS-H2-TLS [vhu]=VLESS-HTTPUpgrade-TLS
-            [tws]=Trojan-WS-TLS [th2]=Trojan-H2-TLS [thu]=Trojan-HTTPUpgrade-TLS
-            [r]=VLESS-REALITY [reality]=VLESS-REALITY [rh2]=VLESS-HTTP2-REALITY
-            [ss]=Shadowsocks [door]=Direct [direct]=Direct [tuic]=TUIC
-            [hy]=Hysteria2 [hy2]=Hysteria2 [anytls]=AnyTLS [socks]=Socks [trojan]=Trojan
-        )
         case $is_lower in
         hysteria*)
             is_new_protocol=Hysteria2
             ;;
         *)
-            is_new_protocol=${protocol_alias[$is_lower]}
-            [[ ! $is_new_protocol ]] && {
-    for v in "${protocol_list[@]}"; do
-                    [[ $(grep -E -i "^$is_lower$" <<<$v) ]] && is_new_protocol=$v && break
+            is_new_protocol=${PROTOCOL_ALIAS[$is_lower]}
+            if [[ ! $is_new_protocol ]]; then
+                for v in "${protocol_list[@]}"; do
+                    [[ ${v,,} == "$is_lower" ]] && is_new_protocol=$v && break
                 done
-            }
+            fi
             [[ ! $is_new_protocol ]] && err "无法识别 ($1), 请使用: $is_core add [protocol] [args... | auto]"
             ;;
         esac
     fi
 
     # no prefer protocol
-    [[ ! $is_new_protocol ]] && ask set_protocol
+    if [[ ! $is_new_protocol ]]; then
+        is_proto_opts=()
+        for v in "${protocol_list[@]}"; do
+            [[ $is_no_auto_tls && ! ${v,,} =~ -tls$ ]] && continue
+            is_proto_opts+=("$v")
+        done
+        ask_menu is_new_protocol "" "\n请选择协议:\n" "" "" "${is_proto_opts[@]}"
+    fi
 
     if [[ ${is_new_protocol,,} == 'anytls' ]]; then
-        is_core_major=$(echo "$is_core_ver" | cut -d. -f1)
-        is_core_minor=$(echo "$is_core_ver" | cut -d. -f2)
-        if [[ ${is_core_major:-0} -lt 1 || ${is_core_major:-0} -eq 1 && ${is_core_minor:-0} -lt 12 ]]; then
-            err "当前 sing-box 版本 ($is_core_ver) 不支持 AnyTLS，请先升级 sing-box core 到 1.12.0 或更高版本。"
-        fi
+        core_at_least 1.12.0 || err "当前 sing-box 版本 ($is_core_ver) 不支持 AnyTLS，请先升级 sing-box core 到 1.12.0 或更高版本。"
     fi
 
     case ${is_new_protocol,,} in
@@ -1015,8 +1043,8 @@ add() {
             is_test uuid "$ss_password" && uuid=$ss_password
             ;;
         esac
-            ! is_test uuid "$uuid" && uuid=
-            is_test uuid "$password" && uuid=$password
+        ! is_test uuid "$uuid" && uuid=
+        is_test uuid "$password" && uuid=$password
     fi
 
     # no-auto-tls only use h2,ws,grpc
@@ -1039,13 +1067,13 @@ add() {
             door_port=$is_use_door_port
         fi
         if [[ $is_use_uuid ]]; then
-                ! is_test uuid "$is_use_uuid" && {
+            ! is_test uuid "$is_use_uuid" && {
                 err "($is_use_uuid) 不是一个有效的 UUID. $is_err_tips"
             }
             uuid=$is_use_uuid
         fi
         if [[ $is_use_path ]]; then
-                ! is_test path "$is_use_path" && {
+            ! is_test path "$is_use_path" && {
                 err "($is_use_path) 不是有效的路径. $is_err_tips"
             }
             path=$is_use_path
@@ -1083,7 +1111,7 @@ add() {
     if [[ $is_use_tls ]]; then
         if [[ ! $is_no_auto_tls && ! $is_caddy && ! $is_gen && ! $is_dont_test_host ]]; then
             # test auto tls
-            is_test port_used 80 || is_test port_used 443 && {
+            { is_test port_used 80 || is_test port_used 443; } && {
                 get_port
                 is_http_port=$tmp_port
                 get_port
@@ -1097,7 +1125,7 @@ add() {
             is_install_caddy=1
         fi
         # set host
-        [[ ! $host ]] && ask string host "请输入域名:"
+        [[ ! $host ]] && ask_value host "请输入域名:"
         # test host dns
         get host-test
     else
@@ -1105,20 +1133,20 @@ add() {
         if [[ $is_main_start ]]; then
 
             # set port
-            [[ ! $port ]] && ask string port "请输入端口:"
+            [[ ! $port ]] && ask_value port "请输入端口:" "" v_port
 
             case ${is_new_protocol,,} in
             socks)
                 # set user
-                [[ ! $is_socks_user ]] && ask string is_socks_user "请设置用户名:"
+                [[ ! $is_socks_user ]] && ask_value is_socks_user "请设置用户名:"
                 # set password
-                [[ ! $is_socks_pass ]] && ask string is_socks_pass "请设置密码:"
+                [[ ! $is_socks_pass ]] && ask_value is_socks_pass "请设置密码:"
                 ;;
             shadowsocks)
                 # set method
-                [[ ! $ss_method ]] && ask set_ss_method
+                [[ ! $ss_method ]] && ask_menu ss_method "" "\n请选择加密方式:\n" "(默认\e[92m $is_random_ss_method\e[0m):" "$is_random_ss_method" "${ss_method_list[@]}"
                 # set password
-                [[ ! $ss_password ]] && ask string ss_password "请设置密码:"
+                [[ ! $ss_password ]] && ask_value ss_password "请设置密码:"
                 ;;
             esac
 
@@ -1128,13 +1156,13 @@ add() {
     # Dokodemo-Door
     if [[ $is_new_protocol == 'Direct' ]]; then
         # set remote addr
-        [[ ! $door_addr ]] && ask string door_addr "请输入目标地址:"
+        [[ ! $door_addr ]] && ask_value door_addr "请输入目标地址:"
         # set remote port
-        [[ ! $door_port ]] && ask string door_port "请输入目标端口:"
+        [[ ! $door_port ]] && ask_value door_port "请输入目标端口:" "" v_port_door
     fi
 
     # Shadowsocks 2022
-    if [[ $(grep 2022 <<<$ss_method) ]]; then
+    if [[ $ss_method == *2022* ]]; then
         # test ss2022 password
         [[ $ss_password ]] && {
             is_test_json=1
@@ -1170,7 +1198,6 @@ add() {
 # get config info
 # or somes required args
 get() {
-    local i v a tt o
     case $1 in
     addr)
         if [[ $is_listen_ip && $is_listen_ip != '::' ]]; then
@@ -1193,36 +1220,19 @@ get() {
     file)
         is_file_str=$2
         [[ ! $is_file_str ]] && is_file_str='.json$'
-        # is_all_json=("$(ls $is_conf_dir | grep -E $is_file_str)")
         readarray -t is_all_json <<<"$(ls "$is_conf_dir" | grep -E -i "$is_file_str" | sed '/^route\.json$/d' | head -$MENU_MAX)" # limit max $MENU_MAX lines for show.
         [[ ! $is_all_json ]] && err "无法找到相关的配置文件: $2"
         [[ ${#is_all_json[@]} -eq 1 ]] && is_config_file=$is_all_json && is_auto_get_config=1
         [[ ! $is_config_file ]] && {
             [[ $is_dont_auto_exit ]] && return
-            ask get_config_file
+            ask_menu is_config_file "" "\n请选择配置:\n" "" "" "${is_all_json[@]}"
         }
         ;;
     info)
         get file $2
         if [[ $is_config_file ]]; then
-            is_json_str=$(cat "$is_conf_dir/$is_config_file")
-            is_json_data=$(jq '(.inbounds[0]|.type,.listen_port,.listen,(.users[0]|.uuid,.password,.username),.method,.password,.override_port,.override_address,(.transport|.type,.path,.headers.host),(.tls|.server_name,.reality.private_key)),(.outbounds[1].tag),(.outbounds[0]|.inet4_bind_address,.inet6_bind_address)' <<<$is_json_str)
-            [[ $? != 0 ]] && err "无法读取此文件: $is_config_file"
-            is_up_var_set=(null is_protocol port is_listen_ip uuid password username ss_method ss_password door_port door_addr net_type path host is_servername is_private_key is_public_key is_bind4 is_bind6)
-            [[ $is_debug ]] && msg "\n------------- debug: $is_config_file -------------"
-            local i v
-            i=0
-            for v in $(sed 's/""/null/g;s/"//g' <<<"$is_json_data"); do
-                ((i++))
-                [[ $is_debug ]] && msg "$i-${is_up_var_set[$i]}: $v"
-                export ${is_up_var_set[$i]}="${v}"
-            done
-            for v in "${is_up_var_set[@]}"; do
-                [[ ${!v} == 'null' ]] && unset $v
-            done
-            [[ $is_bind4 ]] && is_bind_ip=$is_bind4
-            [[ $is_bind6 ]] && is_bind_ip=$is_bind6
-            unset is_bind4 is_bind6
+            is_json_str=$(cat "$is_conf_dir/$is_config_file") || err "无法读取此文件: $is_config_file"
+            load_config_vars "$is_config_file"
 
             if [[ $is_private_key ]]; then
                 is_reality=1
@@ -1241,7 +1251,7 @@ get() {
             is_config_name=$is_config_file
 
             if [[ $is_caddy && $host && -f $is_caddy_conf/$host.conf ]]; then
-                is_tmp_https_port=$(grep -E -o "$host:[1-9][0-9]?+" $is_caddy_conf/$host.conf | sed s/.*://)
+                is_tmp_https_port=$(grep -E -o "$host:[1-9][0-9]?+" "$is_caddy_conf/$host.conf" | sed s/.*://)
             fi
             if [[ $host && ! -f $is_caddy_conf/$host.conf ]]; then
                 is_no_auto_tls=1
@@ -1255,12 +1265,14 @@ get() {
         get addr # get host or server ip
         is_lower=${2,,}
         net=
-        is_users="users:[{uuid:\"$uuid\"}]"
-        is_tls_json='tls:{enabled:true,alpn:["h3"],key_path:"'$is_tls_key'",certificate_path:"'$is_tls_cer'"}'
+        is_path_host_json= # 复位: 更改协议时防止残留上一配置的 path/host 头
+        # 以下 json 片段内只允许 $var 引用, 由 create server 统一 --arg 注入, 不再内插字面值
+        is_users="users:[{uuid:\$uuid}]"
+        is_tls_json='tls:{enabled:true,alpn:["h3"],key_path:$tls_key,certificate_path:$tls_cer}'
         case $is_lower in
         vmess*)
             is_protocol=vmess
-            [[ $is_lower =~ "tcp" || ! $net_type && $is_up_var_set ]] && net=tcp && json_str=$is_users
+            [[ $is_lower =~ "tcp" || ! $net_type && $is_loaded_info ]] && net=tcp && json_str=$is_users
             ;;
         vless*)
             is_protocol=vless
@@ -1269,13 +1281,13 @@ get() {
             net=tuic
             is_protocol=$net
             [[ ! $password ]] && password=$uuid
-            is_users="users:[{uuid:\"$uuid\",password:\"$password\"}]"
+            is_users="users:[{uuid:\$uuid,password:\$password}]"
             json_str="$is_users,congestion_control:\"bbr\",$is_tls_json"
             ;;
         trojan*)
             is_protocol=trojan
             [[ ! $password ]] && password=$uuid
-            is_users="users:[{password:\"$password\"}]"
+            is_users="users:[{password:\$password}]"
             [[ ! $host ]] && {
                 net=trojan
                 json_str="$is_users,${is_tls_json/alpn\:\[\"h3\"\],/}"
@@ -1285,7 +1297,7 @@ get() {
             net=hysteria2
             is_protocol=$net
             [[ ! $password ]] && password=$uuid
-            json_str="users:[{password:\"$password\"}],$is_tls_json"
+            json_str="users:[{password:\$password}],$is_tls_json"
             ;;
         shadowsocks*)
             net=ss
@@ -1293,27 +1305,26 @@ get() {
             [[ ! $ss_method ]] && ss_method=$is_random_ss_method
             [[ ! $ss_password ]] && {
                 ss_password=$uuid
-                [[ $(grep 2022 <<<$ss_method) ]] && ss_password=$(get ss2022)
+                [[ $ss_method == *2022* ]] && ss_password=$(get ss2022)
             }
-            json_str="method:\"$ss_method\",password:\"$ss_password\""
+            json_str="method:\$ss_method,password:\$ss_password"
             ;;
         direct*)
             net=direct
             is_protocol=$net
-            json_str="override_port:$door_port,override_address:\"$door_addr\""
+            json_str="override_port:$door_port,override_address:\$door_addr"
             ;;
         anytls*)
             net=anytls
             is_protocol=$net
             [[ ! $password ]] && password=$uuid
-            is_users="users:[{password:\"$password\"}]"
+            is_users="users:[{password:\$password}]"
             if [[ $is_anytls_domain ]]; then
                 # sing-box >= 1.14.0 uses certificate_provider; older uses acme
-                is_core_minor=$(echo "$is_core_ver" | cut -d. -f2)
-                if [[ ${is_core_minor:-0} -ge 14 ]]; then
-                    is_anytls_tls="tls:{enabled:true,certificate_provider:{type:\"acme\",domain:[\"$is_anytls_domain\"]}}"
+                if core_at_least 1.14.0; then
+                    is_anytls_tls="tls:{enabled:true,certificate_provider:{type:\"acme\",domain:[\$anytls_domain]}}"
                 else
-                    is_anytls_tls="tls:{enabled:true,acme:{domain:[\"$is_anytls_domain\"]}}"
+                    is_anytls_tls="tls:{enabled:true,acme:{domain:[\$anytls_domain]}}"
                 fi
             else
                 is_anytls_tls="${is_tls_json/alpn\:\[\"h3\"\],/}"
@@ -1325,7 +1336,7 @@ get() {
             is_protocol=$net
             [[ ! $is_socks_user ]] && is_socks_user=233boy
             [[ ! $is_socks_pass ]] && is_socks_pass=$uuid
-            json_str="users:[{username: \"$is_socks_user\", password: \"$is_socks_pass\"}]"
+            json_str="users:[{username:\$socks_user,password:\$socks_pass}]"
             ;;
         *)
             err "无法识别协议: $is_config_file"
@@ -1334,7 +1345,7 @@ get() {
         [[ $net ]] && return # if net exist, dont need more json args
         [[ $host && $is_lower =~ "tls" ]] && {
             [[ ! $path ]] && path="/$uuid"
-            is_path_host_json=",path:\"$path\",headers:{host:\"$host\"}"
+            is_path_host_json=",path:\$path,headers:{host:\$host}"
         }
         case $is_lower in
         *quic*)
@@ -1349,7 +1360,7 @@ get() {
             net=reality
             [[ ! $is_servername ]] && is_servername=$is_random_servername
             [[ ! $is_private_key ]] && get_pbk
-            is_json_add="tls:{enabled:true,server_name:\"$is_servername\",reality:{enabled:true,handshake:{server:\"$is_servername\",server_port:443},private_key:\"$is_private_key\",short_id:[\"\"]}}"
+            is_json_add="tls:{enabled:true,server_name:\$servername,reality:{enabled:true,handshake:{server:\$servername,server_port:443},private_key:\$private_key,short_id:[\"\"]}}"
             [[ $is_lower =~ "http" ]] && {
                 is_json_add="$is_json_add,transport:{type:\"http\"}"
             } || {
@@ -1375,19 +1386,19 @@ get() {
         [[ $is_no_auto_tls || $is_gen || $is_dont_test_host ]] && return
         get_ip
         get ping
-        if [[ ! $(grep $ip <<<$is_host_dns) ]]; then
+        if [[ $is_host_dns != *"$ip"* ]]; then
             msg "\n请将 ($(_red_bg $host)) 解析到 ($(_red_bg $ip))"
             msg "\n如果使用 Cloudflare, 在 DNS 那; 关闭 (Proxy status / 代理状态), 即是 (DNS only / 仅限 DNS)"
-            ask string y "我已经确定解析 [y]:"
+            confirm "我已经确定解析 [y]:"
             get ping
-            if [[ ! $(grep $ip <<<$is_host_dns) ]]; then
+            if [[ $is_host_dns != *"$ip"* ]]; then
                 _cyan "\n测试结果: $is_host_dns"
                 err "域名 ($host) 没有解析到 ($ip)"
             fi
         fi
         ;;
     ssss | ss2022)
-        if [[ $(grep 128 <<<$ss_method) ]]; then
+        if [[ $ss_method == *128* ]]; then
             $is_core_bin generate rand 16 --base64
         else
             $is_core_bin generate rand 32 --base64
@@ -1395,7 +1406,7 @@ get() {
         ;;
     ping)
         is_dns_type="a"
-        [[ $(grep ":" <<<$ip) ]] && is_dns_type="aaaa"
+        [[ $ip == *:* ]] && is_dns_type="aaaa"
         is_host_dns=$(_wget -qO- --header="accept: application/dns-json" "$DNS_API?name=$host&type=$is_dns_type")
         ;;
     install-caddy)
@@ -1429,50 +1440,44 @@ get() {
 
 # show info
 # ======================== 配置展示 ========================
-# ======================== 配置展示 ========================
 info() {
-    local i a tt
     if [[ ! $is_protocol ]]; then
         get info $1
     fi
-    # is_color=$(shuf -i 41-45 -n1)
     is_color=44
     case $net in
     ws | tcp | h2 | quic | http*)
         if [[ $host ]]; then
             is_color=45
             is_can_change=(0 1 2 3 5)
-            is_info_show=(0 1 2 3 4 6 7 8)
+            is_show=("协议=$is_protocol" "地址=$is_addr" "端口=$is_https_port" "用户ID=$uuid" "传输协议=$net" "伪装域名=$host" "路径=$path" "TLS=tls")
             [[ $is_protocol == 'vmess' ]] && {
                 is_vmess_url=$(jq -c '{v:2,ps:'\"$net-$host\"',add:'\"$is_addr\"',port:'\"$is_https_port\"',id:'\"$uuid\"',aid:"0",net:'\"$net\"',host:'\"$host\"',path:'\"$path\"',tls:'\"tls\"'}' <<<{})
                 is_url=vmess://$(echo -n $is_vmess_url | base64 -w 0)
             } || {
                 [[ $is_protocol == "trojan" ]] && {
                     uuid=$password
-                    # is_info_str=($is_protocol $is_addr $is_https_port $password $net $host $path 'tls')
                     is_can_change=(0 1 2 3 4)
-                    is_info_show=(0 1 2 10 4 6 7 8)
+                    is_show[3]="密码=$password"
                 }
                 is_url="$is_protocol://$uuid@$host:$is_https_port?encryption=none&security=tls&type=$net&host=$host&path=$path#$net-$host"
             }
             [[ $is_caddy ]] && is_can_change+=(11)
-            is_info_str=($is_protocol $is_addr $is_https_port $uuid $net $host $path 'tls')
         else
             is_type=none
+            is_quic_add=
             is_can_change=(0 1 5)
-            is_info_show=(0 1 2 3 4)
-            is_info_str=($is_protocol $is_addr $port $uuid $net)
+            is_show=("协议=$is_protocol" "地址=$is_addr" "端口=$port" "用户ID=$uuid" "传输协议=$net")
             [[ $net == "http" ]] && {
                 net=tcp
                 is_type=http
                 is_tcp_http=1
-                is_info_show+=(5)
-                is_info_str=(${is_info_str[@]/http/tcp http})
+                is_show[4]="传输协议=tcp http"
+                is_show+=("伪装类型=http")
             }
             [[ $net == "quic" ]] && {
                 is_insecure=1
-                is_info_show+=(8 9 20)
-                is_info_str+=(tls h3 true)
+                is_show+=("TLS=tls" "Alpn=h3" "跳过证书验证=true")
                 is_quic_add=",tls:\"tls\",alpn:\"h3\"" # cant add allowInsecure
             }
             is_vmess_url=$(jq -c "{v:2,ps:\"${net}-$is_addr\",add:\"$is_addr\",port:\"$port\",id:\"$uuid\",aid:\"0\",net:\"$net\",type:\"$is_type\"$is_quic_add}" <<<{})
@@ -1481,86 +1486,70 @@ info() {
         ;;
     ss)
         is_can_change=(0 1 4 6)
-        is_info_show=(0 1 2 10 11)
         is_url="ss://$(echo -n ${ss_method}:${ss_password} | base64 -w 0)@${is_addr}:${port}#$net-${is_addr}"
-        is_info_str=($is_protocol $is_addr $port $ss_password $ss_method)
+        is_show=("协议=$is_protocol" "地址=$is_addr" "端口=$port" "密码=$ss_password" "加密方式=$ss_method")
         ;;
     trojan)
         is_insecure=1
         is_can_change=(0 1 4)
-        is_info_show=(0 1 2 10 4 8 20)
         is_url="$is_protocol://$password@$is_addr:$port?type=tcp&security=tls&insecure=1&allowInsecure=1#$net-$is_addr"
-        is_info_str=($is_protocol $is_addr $port $password tcp tls true)
+        is_show=("协议=$is_protocol" "地址=$is_addr" "端口=$port" "密码=$password" "传输协议=tcp" "TLS=tls" "跳过证书验证=true")
         ;;
     hy*)
         is_can_change=(0 1 4)
-        is_info_show=(0 1 2 10 8 9 20)
         # fix xray core for client use.
         is_sha256=$(openssl x509 -noout -fingerprint -sha256 -in $is_core_dir/bin/tls.cer | sed 's/.*=//;s/://g')
         is_url="$is_protocol://$password@$is_addr:$port?alpn=h3&insecure=1&allowInsecure=1&pinSHA256=$is_sha256#$net-$is_addr"
-        is_info_str=($is_protocol $is_addr $port $password tls h3 "true (设置, 固定证书>证书指纹(SHA-256): $is_sha256)")
+        is_show=("协议=$is_protocol" "地址=$is_addr" "端口=$port" "密码=$password" "TLS=tls" "Alpn=h3" "跳过证书验证=true (设置, 固定证书>证书指纹(SHA-256): $is_sha256)")
         ;;
     tuic)
         is_insecure=1
         is_can_change=(0 1 4 5)
-        is_info_show=(0 1 2 3 10 8 9 20 21)
         is_url="$is_protocol://$uuid:$password@$is_addr:$port?alpn=h3&insecure=1&allowInsecure=1&congestion_control=bbr#$net-$is_addr"
-        is_info_str=($is_protocol $is_addr $port $uuid $password tls h3 true bbr)
+        is_show=("协议=$is_protocol" "地址=$is_addr" "端口=$port" "用户ID=$uuid" "密码=$password" "TLS=tls" "Alpn=h3" "跳过证书验证=true" "拥塞控制=bbr")
         ;;
     reality)
         is_color=41
         is_can_change=(13 0 5 9 10)
         is_flow=xtls-rprx-vision
         is_net_type=tcp
+        is_show=("协议=$is_protocol" "地址=$is_addr" "端口=$port" "用户ID=$uuid")
         if [[ $net_type =~ "http" || ${is_new_protocol,,} =~ "http" ]]; then
             is_flow=
             is_net_type=h2
-            is_info_show=(0 1 2 3 4 8 16 17 18 23 22)
-            is_info_str=($is_protocol $is_addr $port $uuid $is_net_type reality $is_servername chrome $is_public_key $is_listen_ip $is_bind_ip)
+            is_show+=("传输协议=$is_net_type")
         else
-            is_info_show=(0 1 2 3 15 4 8 16 17 18 23 22)
-            is_info_str=($is_protocol $is_addr $port $uuid $is_flow $is_net_type reality $is_servername chrome $is_public_key $is_listen_ip $is_bind_ip)
+            is_show+=("流控=$is_flow" "传输协议=$is_net_type")
         fi
+        is_show+=("TLS=reality" "SNI=$is_servername" "指纹=chrome" "公钥=$is_public_key" "进口IP=$is_listen_ip" "出口IP=$is_bind_ip")
         is_url="$is_protocol://$uuid@$is_addr:$port?encryption=none&security=reality&flow=$is_flow&type=$is_net_type&sni=$is_servername&pbk=$is_public_key&fp=chrome#$net-$is_addr"
         ;;
     anytls)
         is_can_change=(0 1 4)
         if [[ $is_anytls_domain ]]; then
-            is_info_show=(0 1 2 10 8)
-            is_info_str=($is_protocol $is_anytls_domain $port $password tls)
+            is_show=("协议=$is_protocol" "地址=$is_anytls_domain" "端口=$port" "密码=$password" "TLS=tls")
             is_url="anytls://$password@$is_anytls_domain:$port#$net-$is_anytls_domain"
         else
             is_insecure=1
-            is_info_show=(0 1 2 10 8 20)
-            is_info_str=($is_protocol $is_addr $port $password tls true)
+            is_show=("协议=$is_protocol" "地址=$is_addr" "端口=$port" "密码=$password" "TLS=tls" "跳过证书验证=true")
             is_url="anytls://$password@$is_addr:$port?insecure=1&allowInsecure=1#$net-$is_addr"
         fi
         ;;
     direct)
         is_can_change=(0 1 7 8)
-        is_info_show=(0 1 2 13 14)
-        is_info_str=($is_protocol $is_addr $port $door_addr $door_port)
+        is_show=("协议=$is_protocol" "地址=$is_addr" "端口=$port" "目标地址=$door_addr" "目标端口=$door_port")
         ;;
     socks)
         is_can_change=(0 1 12 4)
-        is_info_show=(0 1 2 19 10)
-        is_info_str=($is_protocol $is_addr $port $is_socks_user $is_socks_pass)
+        is_show=("协议=$is_protocol" "地址=$is_addr" "端口=$port" "用户名=$is_socks_user" "密码=$is_socks_pass")
         is_url="socks://$(echo -n ${is_socks_user}:${is_socks_pass} | base64 -w 0)@${is_addr}:${port}#$net-${is_addr}"
         ;;
     esac
     [[ $is_dont_show_info || $is_gen || $is_dont_auto_exit ]] && return # dont show info
     msg "-------------- $is_config_name -------------"
-    for ((i = 0; i < ${#is_info_show[@]}; i++)); do
-        a=${info_list[${is_info_show[$i]}]}
-        if [[ ${#a} -eq 11 || ${#a} -ge 13 ]]; then
-            tt='\t'
-        else
-            tt='\t\t'
-        fi
-        msg "$a $tt= \e[${is_color}m${is_info_str[$i]}\e[0m"
-    done
+    show_info "${is_show[@]}"
     if [[ $is_url ]]; then
-        msg "------------- ${info_list[12]} -------------"
+        msg "------------- 链接 (URL) -------------"
         msg "\e[4;${is_color}m${is_url}\e[0m"
         [[ $is_insecure ]] && {
             warn "某些客户端如(V2rayN 等)导入URL需手动将: 跳过证书验证(allowInsecure) 设置为 true, 或打开: 允许不安全的连接"
@@ -1584,7 +1573,6 @@ footer_msg() {
 
 # update core, sh, caddy
 update() {
-    local i v a tt o
     case $1 in
     1 | core | $is_core)
         is_update_name=core
@@ -1629,17 +1617,16 @@ update() {
     download $is_update_name $is_new_ver
     msg "更新成功, 当前 $is_show_name 版本: $(_green $is_new_ver)\n"
     msg "$(_green 请查看更新说明: https://github.com/$is_update_repo/releases/tag/$is_new_ver)\n"
-    [[ $is_update_name != 'sh' ]] && manage restart $is_update_name &
+    [[ $is_update_name != 'sh' ]] && manage_bg restart $is_update_name
 }
 
 # main menu; if no prefer args.
 is_main_menu() {
-    local i v a tt o
     msg "\n------------- $is_core_name script $is_sh_ver -------------"
     msg "$is_core_name $is_core_ver: $is_core_status"
     is_main_start=1
-    ask mainmenu
-    case $REPLY in
+    ask_menu is_main_pick main_pick "" "" exit "${mainmenu[@]}" # 空输入退出
+    case $main_pick in
     1)
         add
         ;;
@@ -1653,22 +1640,22 @@ is_main_menu() {
         del
         ;;
     5)
-        ask list is_do_manage "启动 停止 重启"
-        manage $REPLY &
+        ask_menu is_do_manage manage_pick "" "" "" 启动 停止 重启
+        manage_bg $manage_pick
         msg "\n管理状态执行: $(_green $is_do_manage)\n"
         ;;
     6)
         is_tmp_list=("更新$is_core_name" "更新脚本")
         [[ $is_caddy ]] && is_tmp_list+=("更新Caddy")
-        ask list is_do_update null "\n请选择更新:\n"
-        update $REPLY
+        ask_menu is_do_update update_pick "\n请选择更新:\n" "" "" "${is_tmp_list[@]}"
+        update $update_pick
         ;;
     7)
         uninstall
         ;;
     8)
-        ask list is_do_other "启用BBR 查看日志 测试运行 重装脚本 设置DNS"
-        case $REPLY in
+        ask_menu is_do_other other_pick "" "" "" 启用BBR 查看日志 测试运行 重装脚本 设置DNS
+        case $other_pick in
         1)
             load bbr.sh
             _try_enable_bbr
@@ -1695,6 +1682,12 @@ is_main_menu() {
 # check prefer args, if not exist prefer args and show main menu
 # ======================== 入口 ========================
 main() {
+    # 并发保护: 同一时刻只允许一个实例修改配置 (fd 持锁至进程退出; 无 flock 或无 /run/lock 的系统自动跳过)
+    if [[ ! $is_locked && -d /run/lock && $(type -P flock) ]]; then
+        exec 9>"/run/lock/$is_core-script.lock"
+        flock -n 9 || err "另一个 $is_core 脚本实例正在运行."
+        is_locked=1
+    fi
     is_main_menu
 }
 

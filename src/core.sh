@@ -118,7 +118,7 @@ show_info() {
 }
 
 print_no_auto_tls_hint() {
-    msg "\e[41m no-auto-tls 帮助(help)\e[0m: $(msg_ul https://233boy.com/$is_core/no-auto-tls/)\n"
+    msg "\e[41m no-auto-tls 帮助(help)\e[0m: $(msg_ul https://github.com/${is_sh_repo})\n"
 }
 
 # pause
@@ -262,6 +262,9 @@ unsupported() { err "($is_config_file) 不支持$1."; }
 
 bracket_v6() { [[ $1 == *:* && $1 != \[* ]] && echo "[$1]" || echo "$1"; }
 
+# URL 百分号编码 (jq @uri, 正确处理 UTF-8); 用于分享链接 userinfo 里的密码等用户可控值
+url_encode() { jq -rn --arg v "$1" '$v|@uri'; }
+
 # 测试运行单个服务：未运行时拉起并打印失败信息
 _test_run_one() {
     local name=$1 bin=$2 svc=$3 cfg=$4
@@ -303,10 +306,10 @@ _wait_core_alive() {
 # 从配置文件提取字段到全局变量 (key=value 形式, 顺序无关, 值可含空格/=)
 load_config_vars() {
     local f=$is_conf_dir/$1 data k v
-    # 复位上次加载的字段, 避免串配置
+    # 复位上次加载的字段, 避免串配置 (含 reality/anytls 标记, 防跨配置残留)
     unset is_protocol port is_listen_ip uuid password username ss_method ss_password \
         door_port door_addr net_type path host is_servername is_private_key \
-        is_public_key is_bind_ip
+        is_public_key is_bind_ip is_reality is_anytls_domain
     data=$(jq -r '
         def p($k;$v): if $v == null then empty else "\($k)=\($v|tostring)" end;
         .inbounds[0] as $i |
@@ -741,7 +744,7 @@ change() {
         # new is_private_key is_public_key
         is_new_private_key=$3
         is_new_public_key=$4
-        [[ ! $is_reality ]] && err "($is_config_file) 不支持更改密钥."
+        [[ ! $is_reality ]] && unsupported "${change_list[$is_change_id]}"
         if [[ $is_auto ]]; then
             get_pbk
             add $net
@@ -1338,7 +1341,7 @@ get() {
         socks*)
             net=socks
             is_protocol=$net
-            [[ ! $is_socks_user ]] && is_socks_user=233boy
+            [[ ! $is_socks_user ]] && is_socks_user=$is_core
             [[ ! $is_socks_pass ]] && is_socks_pass=$uuid
             json_str="users:[{username:\$socks_user,password:\$socks_pass}]"
             ;;
@@ -1456,8 +1459,11 @@ info() {
             is_can_change=(0 1 2 3 5)
             is_show=("协议=$is_protocol" "地址=$is_addr" "端口=$is_https_port" "用户ID=$uuid" "传输协议=$net" "伪装域名=$host" "路径=$path" "TLS=tls")
             [[ $is_protocol == 'vmess' ]] && {
-                is_vmess_url=$(jq -c '{v:2,ps:'\"$net-$host\"',add:'\"$is_addr\"',port:'\"$is_https_port\"',id:'\"$uuid\"',aid:"0",net:'\"$net\"',host:'\"$host\"',path:'\"$path\"',tls:'\"tls\"'}' <<<{})
-                is_url=vmess://$(echo -n $is_vmess_url | base64 -w 0)
+                is_vmess_url=$(jq -cn \
+                    --arg ps "$net-$host" --arg add "$is_addr" --arg port "$is_https_port" \
+                    --arg id "$uuid" --arg net "$net" --arg host "$host" --arg path "$path" \
+                    '{v:2,ps:$ps,add:$add,port:$port,id:$id,aid:"0",net:$net,host:$host,path:$path,tls:"tls"}')
+                is_url=vmess://$(echo -n "$is_vmess_url" | base64 -w 0)
             } || {
                 [[ $is_protocol == "trojan" ]] && {
                     uuid=$password
@@ -1469,7 +1475,6 @@ info() {
             [[ $is_caddy ]] && is_can_change+=(11)
         else
             is_type=none
-            is_quic_add=
             is_can_change=(0 1 5)
             is_show=("协议=$is_protocol" "地址=$is_addr" "端口=$port" "用户ID=$uuid" "传输协议=$net")
             [[ $net == "http" ]] && {
@@ -1482,10 +1487,19 @@ info() {
             [[ $net == "quic" ]] && {
                 is_insecure=1
                 is_show+=("TLS=tls" "Alpn=h3" "跳过证书验证=true")
-                is_quic_add=",tls:\"tls\",alpn:\"h3\"" # cant add allowInsecure
             }
-            is_vmess_url=$(jq -c "{v:2,ps:\"${net}-$is_addr\",add:\"$is_addr\",port:\"$port\",id:\"$uuid\",aid:\"0\",net:\"$net\",type:\"$is_type\"$is_quic_add}" <<<{})
-            is_url=vmess://$(echo -n $is_vmess_url | base64 -w 0)
+            if [[ $net == "quic" ]]; then
+                is_vmess_url=$(jq -cn \
+                    --arg ps "${net}-$is_addr" --arg add "$is_addr" --arg port "$port" \
+                    --arg id "$uuid" --arg net "$net" --arg type "$is_type" \
+                    '{v:2,ps:$ps,add:$add,port:$port,id:$id,aid:"0",net:$net,type:$type,tls:"tls",alpn:"h3"}')
+            else
+                is_vmess_url=$(jq -cn \
+                    --arg ps "${net}-$is_addr" --arg add "$is_addr" --arg port "$port" \
+                    --arg id "$uuid" --arg net "$net" --arg type "$is_type" \
+                    '{v:2,ps:$ps,add:$add,port:$port,id:$id,aid:"0",net:$net,type:$type}')
+            fi
+            is_url=vmess://$(echo -n "$is_vmess_url" | base64 -w 0)
         fi
         ;;
     ss)
@@ -1496,20 +1510,20 @@ info() {
     trojan)
         is_insecure=1
         is_can_change=(0 1 4)
-        is_url="$is_protocol://$password@$is_addr:$port?type=tcp&security=tls&insecure=1&allowInsecure=1#$net-$is_addr"
+        is_url="$is_protocol://$(url_encode "$password")@$is_addr:$port?type=tcp&security=tls&insecure=1&allowInsecure=1#$net-$is_addr"
         is_show=("协议=$is_protocol" "地址=$is_addr" "端口=$port" "密码=$password" "传输协议=tcp" "TLS=tls" "跳过证书验证=true")
         ;;
     hy*)
         is_can_change=(0 1 4)
         # fix xray core for client use.
         is_sha256=$(openssl x509 -noout -fingerprint -sha256 -in $is_core_dir/bin/tls.cer | sed 's/.*=//;s/://g')
-        is_url="$is_protocol://$password@$is_addr:$port?alpn=h3&insecure=1&allowInsecure=1&pinSHA256=$is_sha256#$net-$is_addr"
+        is_url="$is_protocol://$(url_encode "$password")@$is_addr:$port?alpn=h3&insecure=1&allowInsecure=1&pinSHA256=$is_sha256#$net-$is_addr"
         is_show=("协议=$is_protocol" "地址=$is_addr" "端口=$port" "密码=$password" "TLS=tls" "Alpn=h3" "跳过证书验证=true (设置, 固定证书>证书指纹(SHA-256): $is_sha256)")
         ;;
     tuic)
         is_insecure=1
         is_can_change=(0 1 4 5)
-        is_url="$is_protocol://$uuid:$password@$is_addr:$port?alpn=h3&insecure=1&allowInsecure=1&congestion_control=bbr#$net-$is_addr"
+        is_url="$is_protocol://$uuid:$(url_encode "$password")@$is_addr:$port?alpn=h3&insecure=1&allowInsecure=1&congestion_control=bbr#$net-$is_addr"
         is_show=("协议=$is_protocol" "地址=$is_addr" "端口=$port" "用户ID=$uuid" "密码=$password" "TLS=tls" "Alpn=h3" "跳过证书验证=true" "拥塞控制=bbr")
         ;;
     reality)
@@ -1532,11 +1546,11 @@ info() {
         is_can_change=(0 1 4)
         if [[ $is_anytls_domain ]]; then
             is_show=("协议=$is_protocol" "地址=$is_anytls_domain" "端口=$port" "密码=$password" "TLS=tls")
-            is_url="anytls://$password@$is_anytls_domain:$port#$net-$is_anytls_domain"
+            is_url="anytls://$(url_encode "$password")@$is_anytls_domain:$port#$net-$is_anytls_domain"
         else
             is_insecure=1
             is_show=("协议=$is_protocol" "地址=$is_addr" "端口=$port" "密码=$password" "TLS=tls" "跳过证书验证=true")
-            is_url="anytls://$password@$is_addr:$port?insecure=1&allowInsecure=1#$net-$is_addr"
+            is_url="anytls://$(url_encode "$password")@$is_addr:$port?insecure=1&allowInsecure=1#$net-$is_addr"
         fi
         ;;
     direct)

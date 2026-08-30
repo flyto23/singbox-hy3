@@ -1,7 +1,6 @@
 #!/bin/bash
 
-author=233boy
-# github=https://github.com/233boy/sing-box
+# github=https://github.com/flyto23/singbox-hy3
 
 # bash fonts colors
 red='\e[31m'
@@ -66,6 +65,7 @@ is_core_name=sing-box
 is_core_dir=/etc/$is_core
 is_core_bin=$is_core_dir/bin/$is_core
 is_core_repo=SagerNet/$is_core
+JQ_VER=1.7.1
 is_conf_dir=$is_core_dir/conf
 is_log_dir=/var/log/$is_core
 is_sh_bin=/usr/local/bin/$is_core
@@ -108,7 +108,7 @@ _wget() {
 }
 
 # print a mesage
-msg() {
+log_msg() {
     case $1 in
     warn)
         local color=$yellow
@@ -144,13 +144,15 @@ install_pkg() {
     done
     if [[ $cmd_not_found ]]; then
         pkg=$(echo $cmd_not_found | sed 's/,/ /g')
-        msg warn "安装依赖包 >${pkg}"
+        log_msg warn "安装依赖包 >${pkg}"
         if [[ $cmd =~ apk ]]; then
             apk update &>/dev/null
             apk add $pkg &>/dev/null
+            pkg_ok=$?
         else
             $cmd install -y $pkg &>/dev/null
-            if [[ $? != 0 ]]; then
+            pkg_ok=$?
+            if [[ $pkg_ok != 0 ]]; then
                 [[ $cmd =~ yum ]] && yum install epel-release -y &>/dev/null
                 if [[ $cmd =~ zypper ]]; then
                     $cmd --non-interactive refresh &>/dev/null
@@ -158,9 +160,10 @@ install_pkg() {
                     $cmd update -y &>/dev/null
                 fi
                 $cmd install -y $pkg &>/dev/null
+                pkg_ok=$?
             fi
         fi
-        [[ $? == 0 ]] && >$is_pkg_ok
+        [[ $pkg_ok == 0 ]] && >$is_pkg_ok
     else
         >$is_pkg_ok
     fi
@@ -183,7 +186,7 @@ download() {
         is_ok=$is_sh_ok
         ;;
     jq)
-        link=https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-$is_arch
+        link=https://github.com/jqlang/jq/releases/download/jq-$JQ_VER/jq-linux-$is_arch
         name="jq"
         tmpfile=$tmpjq
         is_ok=$is_jq_ok
@@ -191,7 +194,7 @@ download() {
     esac
 
     [[ $link ]] && {
-        msg warn "下载 ${name} > ${link}"
+        log_msg warn "下载 ${name} > ${link}"
         if _wget -t 3 -q -c $link -O $tmpfile; then
             mv -f $tmpfile $is_ok
         fi
@@ -208,11 +211,11 @@ get_ip() {
 check_status() {
     # dependent pkg install fail
     [[ ! -f $is_pkg_ok ]] && {
-        msg err "安装依赖包失败"
+        log_msg err "安装依赖包失败"
         if [[ $cmd =~ apk ]]; then
-            msg err "请尝试手动安装依赖包: apk update; apk add $is_pkg"
+            log_msg err "请尝试手动安装依赖包: apk update; apk add $is_pkg"
         else
-            msg err "请尝试手动安装依赖包: $cmd update -y; $cmd install -y $is_pkg"
+            log_msg err "请尝试手动安装依赖包: $cmd update -y; $cmd install -y $is_pkg"
         fi
         is_fail=1
     }
@@ -220,15 +223,15 @@ check_status() {
     # download file status
     if [[ $is_wget ]]; then
         [[ ! -f $is_core_ok ]] && {
-            msg err "下载 ${is_core_name} 失败"
+            log_msg err "下载 ${is_core_name} 失败"
             is_fail=1
         }
         [[ ! -f $is_sh_ok ]] && {
-            msg err "下载 ${is_core_name} 脚本失败"
+            log_msg err "下载 ${is_core_name} 脚本失败"
             is_fail=1
         }
         [[ ! -f $is_jq_ok ]] && {
-            msg err "下载 jq 失败"
+            log_msg err "下载 jq 失败"
             is_fail=1
         }
     else
@@ -301,8 +304,8 @@ pass_args() {
 exit_and_del_tmpdir() {
     rm -rf $tmpdir
     [[ ! $1 ]] && {
-        msg err "哦豁.."
-        msg err "安装过程出现错误..."
+        log_msg err "哦豁.."
+        log_msg err "安装过程出现错误..."
         echo -e "反馈问题) https://github.com/${is_sh_repo}/issues"
         echo
         exit 1
@@ -324,24 +327,24 @@ main() {
     # show welcome msg
     clear
     echo
-    echo "........... $is_core_name script by $author .........."
+    echo "........... $is_core_name script .........."
     echo
 
     # start installing...
-    msg warn "开始安装..."
-    [[ $is_core_ver ]] && msg warn "${is_core_name} 版本: ${yellow}$is_core_ver${none}"
-    [[ $proxy ]] && msg warn "使用代理: ${yellow}$proxy${none}"
+    log_msg warn "开始安装..."
+    [[ $is_core_ver ]] && log_msg warn "${is_core_name} 版本: ${yellow}$is_core_ver${none}"
+    [[ $proxy ]] && log_msg warn "使用代理: ${yellow}$proxy${none}"
     # create tmpdir
     mkdir -p $tmpdir
     # if is_core_file, copy file
     [[ $is_core_file ]] && {
         cp -f $is_core_file $is_core_ok
-        msg warn "${yellow}${is_core_name} 文件使用 > $is_core_file${none}"
+        log_msg warn "${yellow}${is_core_name} 文件使用 > $is_core_file${none}"
     }
     # local dir install sh script
     [[ $local_install ]] && {
         >$is_sh_ok
-        msg warn "${yellow}本地获取安装脚本 > $PWD ${none}"
+        log_msg warn "${yellow}本地获取安装脚本 > $PWD ${none}"
     }
 
     if [[ $is_systemd ]]; then
@@ -386,18 +389,18 @@ main() {
         mkdir -p $tmpdir/testzip
         tar zxf $is_core_ok --strip-components 1 -C $tmpdir/testzip &>/dev/null
         [[ $? != 0 ]] && {
-            msg err "${is_core_name} 文件无法通过测试."
+            log_msg err "${is_core_name} 文件无法通过测试."
             exit_and_del_tmpdir
         }
         [[ ! -f $tmpdir/testzip/$is_core ]] && {
-            msg err "${is_core_name} 文件无法通过测试."
+            log_msg err "${is_core_name} 文件无法通过测试."
             exit_and_del_tmpdir
         }
     fi
 
     # get server ip.
     [[ ! $ip ]] && {
-        msg err "获取服务器 IP 失败."
+        log_msg err "获取服务器 IP 失败."
         exit_and_del_tmpdir
     }
 
@@ -423,8 +426,8 @@ main() {
     fi
 
     # add alias
-    echo "alias sb=$is_sh_bin" >>/root/.bashrc
-    echo "alias $is_core=$is_sh_bin" >>/root/.bashrc
+    grep -q "^alias sb=" /root/.bashrc || echo "alias sb=$is_sh_bin" >>/root/.bashrc
+    grep -q "^alias $is_core=" /root/.bashrc || echo "alias $is_core=$is_sh_bin" >>/root/.bashrc
 
     # core command
     ln -sf $is_sh_dir/$is_core.sh $is_sh_bin
@@ -440,7 +443,7 @@ main() {
     mkdir -p $is_log_dir
 
     # show a tips msg
-    msg ok "生成配置文件..."
+    log_msg ok "生成配置文件..."
 
     # create service
     load systemd.sh

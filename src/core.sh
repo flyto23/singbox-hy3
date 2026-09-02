@@ -309,7 +309,7 @@ load_config_vars() {
     # 复位上次加载的字段, 避免串配置 (含 reality/anytls 标记, 防跨配置残留)
     unset is_protocol port is_listen_ip uuid password username ss_method ss_password \
         door_port door_addr net_type path host is_servername is_private_key \
-        is_public_key is_bind_ip is_reality is_anytls_domain
+        is_public_key is_bind_ip is_listen_disp is_bind_disp is_reality is_anytls_domain
     data=$(jq -r '
         def p($k;$v): if $v == null then empty else "\($k)=\($v|tostring)" end;
         .inbounds[0] as $i |
@@ -328,6 +328,8 @@ load_config_vars() {
         p("is_servername";  $i.tls.server_name),
         p("is_private_key"; $i.tls.reality.private_key),
         p("is_public_key";  .outbounds[1].tag),
+        p("is_listen_disp"; ([.outbounds[].tag | select(startswith("nat_in_"))][0] | .[7:])),
+        p("is_bind_disp";   ([.outbounds[].tag | select(startswith("nat_out_"))][0] | .[8:])),
         p("is_bind4";       .outbounds[0].inet4_bind_address),
         p("is_bind6";       .outbounds[0].inet6_bind_address)
     ' "$f" 2>/dev/null) || err "无法读取此文件: $1"
@@ -493,7 +495,7 @@ _resolve_listen() {
 }
 
 select_local_ip() {
-    local prompt="$1" var="$2"
+    local prompt="$1" var="$2" i pick idx
     is_local_ips=()
     [[ $(type -P ip) ]] && {
         is_local_ips+=($(ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -v '^127\.0\.0\.1$'))
@@ -501,9 +503,59 @@ select_local_ip() {
     }
     [[ $(type -P hostname) ]] && is_local_ips+=($(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^127\.0\.0\.1$'))
     [[ ${#is_local_ips[@]} -gt 0 ]] && is_local_ips=($(printf '%s\n' "${is_local_ips[@]}" | awk '!seen[$0]++'))
-    [[ ${#is_local_ips[@]} -eq 0 ]] && { printf -v "$var" ''; return 1; }
-    is_tmp_list=("${is_local_ips[@]}")
-    ask_menu "$var" "" "$prompt" "请选择序号 [1-${#is_tmp_list[@]}], 回车选择第一项(${is_tmp_list[0]}):" "${is_tmp_list[0]}" "${is_tmp_list[@]}"
+
+    # NAT 机器探测: 本机没有公网地址, 但能从出口取到公网(NAT)地址 → 视为 NAT,
+    # 此时把公网 IP 作为可选项(置顶), 供进口IP/出口IP 选择时展示与自动适配.
+    # 直接探测出口地址(不调 get_ip, 避免其取不到 IP 时 err 退出中断菜单);
+    # 同一 change 会话会连选进口/出口两次, 探测结果缓存于 is_nat_detected, 偶发失败不覆盖首次成功值.
+    if [[ ! $is_dont_get_ip && $(type -P wget) && ! $is_nat_detected ]]; then
+        is_nat_detected=1
+        is_wan_ip=
+        is_nat_only=
+        is_tmp_ip=$(_wget -4 -qO- "$IP_API" 2>/dev/null | sed -n 's/^ip=//p' | head -1)
+        [[ ! $is_tmp_ip ]] && is_tmp_ip=$(_wget -6 -qO- "$IP_API" 2>/dev/null | sed -n 's/^ip=//p' | head -1)
+        if [[ $is_tmp_ip ]]; then
+            is_wan_ip=$is_tmp_ip
+            is_wan_local=
+            for i in "${is_local_ips[@]}"; do
+                [[ $i == "$is_wan_ip" ]] && is_wan_local=1 && break
+            done
+            is_nat_only=
+            [[ $is_wan_local ]] || is_nat_only=1
+        fi
+    fi
+
+    # 组装带标注的可选项 (值=纯 IP, 标注=来源说明); 公网(NAT)IP 置顶并作为默认项
+    is_ip_opt=() is_ip_tag=()
+    if [[ $is_nat_only ]]; then
+        is_ip_opt+=("$is_wan_ip")
+        is_ip_tag+=("公网/NAT出口")
+    fi
+    for i in "${is_local_ips[@]}"; do
+        is_ip_opt+=("$i")
+        is_ip_tag+=("本机地址")
+    done
+    [[ ${#is_ip_opt[@]} -eq 0 ]] && {
+        printf -v "$var" ''
+        return 1
+    }
+
+    msg "$prompt"
+    for ((i = 0; i < ${#is_ip_opt[@]}; i++)); do
+        printf "  %2d) %-39s (%s)\n" $((i + 1)) "${is_ip_opt[i]}" "${is_ip_tag[i]}"
+    done
+    while :; do
+        echo -ne "请选择序号 [1-${#is_ip_opt[@]}], 回车选择第一项(${is_ip_tag[0]} ${is_ip_opt[0]}):"
+        read -r pick
+        [[ -z $pick ]] && pick=1
+        if [[ $pick =~ ^[0-9]+$ ]] && (( 10#$pick >= 1 && 10#$pick <= ${#is_ip_opt[@]} )); then
+            idx=$((10#$pick - 1))
+            printf -v "$var" '%s' "${is_ip_opt[idx]}"
+            msg "选择: ${is_ip_opt[idx]} (${is_ip_tag[idx]})"
+            return 0
+        fi
+        msg "输入${is_err}"
+    done
 }
 
 # ======================== 配置创建 ========================
@@ -522,7 +574,12 @@ create() {
             # 约定：reality 公钥藏入一个假 outbound 的 tag（public_key_<key>），
             # 读回逻辑见 load_config_vars（is_public_key=${is_public_key/public_key_/}），
             # 并依赖 build_route_json 的 ^direct_[0-9]+$ 过滤不误伤该 outbound。
-            is_add_public_key=",outbounds:[{tag:\"direct_$port\",type:\"direct\"${is_bind_json_addr}},{tag:\"public_key_$is_public_key\",type:\"direct\"}]"
+            # NAT 适配: 公网(NAT)IP 非本机绑定地址, 不作为实际 listen/bind 的取值(实际用本机地址/不绑定),
+            # 仅作为展示/链接地址, 经 nat_in_/nat_out_ tag 持久化, 由 load_config_vars 读回 (见 change 分支 13).
+            is_add_public_key=",outbounds:[{tag:\"direct_$port\",type:\"direct\"${is_bind_json_addr}},{tag:\"public_key_$is_public_key\",type:\"direct\"}"
+            [[ $is_listen_disp ]] && is_add_public_key+=",{tag:\"nat_in_$is_listen_disp\",type:\"direct\"}"
+            [[ $is_bind_disp ]] && is_add_public_key+=",{tag:\"nat_out_$is_bind_disp\",type:\"direct\"}"
+            is_add_public_key+="]"
         } || is_add_public_key=
         # 用户可控值一律走 --arg 注入, 片段内只允许出现 $var 引用, 杜绝转义/注入问题
         is_new_json=$(jq \
@@ -807,13 +864,33 @@ change() {
         }
         [[ $is_new_port && $is_new_port != $port ]] && port=$is_new_port
         # 2) 新进口IP (inbound listen)
-        select_local_ip "\n请选择进口 IP (本机可用地址):\n" is_new_listen_ip
-        is_listen_ip=$is_new_listen_ip
-        select_local_ip "\n请选择出口 IP (本机可用地址):\n" is_new_bind_ip
-        if [[ $is_new_bind_ip ]]; then
-            validate_ip "$is_new_bind_ip" || err "($is_new_bind_ip) 不是有效的 IPv4 / IPv6 地址."
+        # NAT 适配: 公网(NAT)IP 非本机绑定地址, 不能直接作为 listen; 实际仍监听在本机地址
+        # (承接 NAT 转发来的入站, 取本机第一地址), 公网 IP 仅作为展示/链接地址(create 以 nat_in_ tag 持久化).
+        select_local_ip "\n请选择进口 IP:\n" is_new_listen_ip
+        is_listen_ip=
+        is_listen_disp=
+        if [[ $is_new_listen_ip ]]; then
+            if [[ $is_new_listen_ip == "$is_wan_ip" && $is_nat_only ]]; then
+                is_listen_disp=$is_new_listen_ip
+                is_listen_ip=${is_local_ips[0]}
+            else
+                is_listen_ip=$is_new_listen_ip
+            fi
         fi
-        is_bind_ip=$is_new_bind_ip
+        # 3) 新出口IP (outbound source bind)
+        # NAT 适配: 选公网(NAT)IP 时, 出站默认即走公网 NAT 出口, 无需绑定本机不存在的公网地址,
+        # 实际不写 inet4_bind_address, 公网 IP 仅作展示(经 create 以 nat_out_ tag 持久化).
+        select_local_ip "\n请选择出口 IP:\n" is_new_bind_ip
+        is_bind_ip=
+        is_bind_disp=
+        if [[ $is_new_bind_ip ]]; then
+            if [[ $is_new_bind_ip == "$is_wan_ip" && $is_nat_only ]]; then
+                is_bind_disp=$is_new_bind_ip
+            else
+                validate_ip "$is_new_bind_ip" || err "($is_new_bind_ip) 不是有效的 IPv4 / IPv6 地址."
+                is_bind_ip=$is_new_bind_ip
+            fi
+        fi
         add $net
         ;;
     esac
@@ -887,10 +964,20 @@ uninstall() {
     msg "反馈问题) $(msg_ul https://github.com/${is_sh_repo}/issues)\n"
 }
 
+# 释放脚本并发锁 fd (fd 9): 防止锁随服务进程链被 sing-box 守护进程长期继承占用.
+# OpenRC 下 manage -> rc-service -> init 脚本 -> start-stop-daemon -> sing-box 均继承该 fd,
+# 若不释放, 守护进程会一直持有 flock, 之后运行 sb 会误报 "另一个 sing-box 脚本实例正在运行" 而无法进入菜单.
+_release_lock_fd() {
+    [[ $is_locked ]] || return 0
+    [[ -e /proc/self/fd/9 ]] && exec 9>&- 2>/dev/null
+    is_locked=
+}
+
 # manage run status
 manage_bg() { manage "$@" & }
 manage() {
     [[ $is_dont_auto_exit ]] && return
+    _release_lock_fd
     case $1 in
     1 | start)
         is_do=start
@@ -1207,7 +1294,10 @@ add() {
 get() {
     case $1 in
     addr)
-        if [[ $is_listen_ip && $is_listen_ip != '::' ]]; then
+        if [[ $is_listen_disp ]]; then
+            is_addr=$is_listen_disp
+            is_addr=$(bracket_v6 "$is_addr")
+        elif [[ $is_listen_ip && $is_listen_ip != '::' ]]; then
             is_addr=$is_listen_ip
             is_addr=$(bracket_v6 "$is_addr")
         else
@@ -1539,7 +1629,7 @@ info() {
         else
             is_show+=("流控=$is_flow" "传输协议=$is_net_type")
         fi
-        is_show+=("TLS=reality" "SNI=$is_servername" "指纹=chrome" "公钥=$is_public_key" "进口IP=$is_listen_ip" "出口IP=$is_bind_ip")
+        is_show+=("TLS=reality" "SNI=$is_servername" "指纹=chrome" "公钥=$is_public_key" "进口IP=${is_listen_disp:-$is_listen_ip}" "出口IP=${is_bind_disp:-$is_bind_ip}")
         is_url="$is_protocol://$uuid@$is_addr:$port?encryption=none&security=reality&flow=$is_flow&type=$is_net_type&sni=$is_servername&pbk=$is_public_key&fp=chrome#$net-$is_addr"
         ;;
     anytls)

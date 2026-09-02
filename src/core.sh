@@ -546,30 +546,30 @@ read_if_inet6() {
     done < /proc/net/if_inet6
 }
 
-# 判断本机是否有"可用"的 IPv6 (非环回/链路本地的已绑定地址)
-have_global_v6() {
-    [[ -r /proc/net/if_inet6 ]] || return 1
-    local hex iface
-    while read -r hex _ _ _ _ iface; do
-        [[ $iface == lo ]] && continue
-        [[ ${hex,,} == fe80* || ${hex,,} == 00000000000000000000000000000001 ]] && continue
-        return 0
-    done < /proc/net/if_inet6
-    return 1
-}
-
 select_local_ip() {
     local prompt="$1" var="$2" i pick idx a b
-    # 收集本机已绑定地址 (IPv4/IPv6), 兼容 iproute2 与 busybox ip:
-    # 直接匹配 inet/inet6 行提取地址, 不依赖 -o 单行/列号, 避免漏掉 IPv6.
+    # 收集本机已绑定地址 (IPv4/IPv6)。不同系统可用工具/输出格式不同, 叠加多种解析再统一过滤去重:
+    #   ip -o 单行 / 普通多行 / 不限 family, 以及 hostname -I、/proc/net/if_inet6.
     is_local_ips=()
     if [[ $(type -P ip) ]]; then
+        # ip -o 单行 (iproute2; 部分环境仅此格式可用, 原实现已验证)
+        while read -r a; do
+            [[ $a ]] && is_local_ips+=("$a")
+        done < <(ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
+        while read -r a; do
+            [[ $a ]] && is_local_ips+=("$a")
+        done < <(ip -o -6 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
+        # 普通多行格式 (直接匹配 inet/inet6 行, 兼容 busybox ip)
         while read -r a; do
             [[ $a ]] && is_local_ips+=("$a")
         done < <(ip -4 addr show 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\//\1/p')
         while read -r a; do
             [[ $a ]] && is_local_ips+=("$a")
         done < <(ip -6 addr show 2>/dev/null | sed -n 's/.*inet6 \([0-9A-Fa-f:]*\)\//\1/p')
+        # 不限 family (部分 busybox 对 -4/-6 选项支持不佳)
+        while read -r a; do
+            [[ $a ]] && is_local_ips+=("$a")
+        done < <(ip addr show 2>/dev/null | sed -n -e 's/.*inet \([0-9.]*\)\//\1/p' -e 's/.*inet6 \([0-9A-Fa-f:]*\)\//\1/p')
     fi
     # hostname -I 作为补充来源 (部分精简环境只有该命令可用)
     if [[ $(type -P hostname) ]]; then
@@ -598,18 +598,10 @@ select_local_ip() {
         is_wan_ips=()
         is_tmp_ip=$(_wget -4 -T 5 -qO- "$IP_API" 2>/dev/null | sed -n 's/^ip=//p' | head -1)
         [[ $is_tmp_ip ]] && is_wan_ips+=("$is_tmp_ip")
-        # IPv6 出口: 仅当机器具备 v6 能力时探测 (有全局 v6 地址或默认 v6 路由),
-        # 避免无 v6 环境下 -6 连接卡顿
-        is_have_v6=
-        if [[ $(type -P ip) ]]; then
-            ip -6 addr show 2>/dev/null | grep -q 'inet6 .*scope global' && is_have_v6=1
-            ip -6 route show default 2>/dev/null | grep -q '^default' && is_have_v6=1
-        fi
-        have_global_v6 && is_have_v6=1
-        if [[ $is_have_v6 ]]; then
-            is_tmp_ip=$(_wget -6 -T 5 -qO- "$IP_API" 2>/dev/null | sed -n 's/^ip=//p' | head -1)
-            [[ $is_tmp_ip ]] && is_wan_ips+=("$is_tmp_ip")
-        fi
+        # IPv6 出口探测: 无条件尝试(短超时)。无 v6 时内核立即报不可达或 3s 超时跳过, 不会卡死菜单;
+        # 宿主机 NAT 提供 v6(容器内无绑定 v6)时, 出口地址同样能探测到并列在"公网/NAT出口".
+        is_tmp_ip=$(_wget -6 -T 3 -qO- "$IP_API" 2>/dev/null | sed -n 's/^ip=//p' | head -1)
+        [[ $is_tmp_ip ]] && is_wan_ips+=("$is_tmp_ip")
         # 仅保留确实非本机、且互不重复的出口地址
         is_wan_ok=()
         for a in "${is_wan_ips[@]}"; do

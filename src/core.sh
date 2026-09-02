@@ -494,45 +494,148 @@ _resolve_listen() {
     fi
 }
 
-select_local_ip() {
-    local prompt="$1" var="$2" i pick idx
-    is_local_ips=()
-    [[ $(type -P ip) ]] && {
-        is_local_ips+=($(ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -v '^127\.0\.0\.1$'))
-        is_local_ips+=($(ip -o -6 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -vE '^(fe80|::1|::)'))
-    }
-    [[ $(type -P hostname) ]] && is_local_ips+=($(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^127\.0\.0\.1$'))
-    [[ ${#is_local_ips[@]} -gt 0 ]] && is_local_ips=($(printf '%s\n' "${is_local_ips[@]}" | awk '!seen[$0]++'))
-
-    # NAT 机器探测: 本机没有公网地址, 但能从出口取到公网(NAT)地址 → 视为 NAT,
-    # 此时把公网 IP 作为可选项(置顶), 供进口IP/出口IP 选择时展示与自动适配.
-    # 直接探测出口地址(不调 get_ip, 避免其取不到 IP 时 err 退出中断菜单);
-    # 同一 change 会话会连选进口/出口两次, 探测结果缓存于 is_nat_detected, 偶发失败不覆盖首次成功值.
-    if [[ ! $is_dont_get_ip && $(type -P wget) && ! $is_nat_detected ]]; then
-        is_nat_detected=1
-        is_wan_ip=
-        is_nat_only=
-        is_tmp_ip=$(_wget -4 -qO- "$IP_API" 2>/dev/null | sed -n 's/^ip=//p' | head -1)
-        [[ ! $is_tmp_ip ]] && is_tmp_ip=$(_wget -6 -qO- "$IP_API" 2>/dev/null | sed -n 's/^ip=//p' | head -1)
-        if [[ $is_tmp_ip ]]; then
-            is_wan_ip=$is_tmp_ip
-            is_wan_local=
-            for i in "${is_local_ips[@]}"; do
-                [[ $i == "$is_wan_ip" ]] && is_wan_local=1 && break
+# 将 /proc/net/if_inet6 的 32 位 hex 转为 RFC5952 压缩 IPv6 (非法输入返回空)
+ipv6_compress() {
+    local hex=${1,,}
+    [[ $hex =~ ^[0-9a-f]{32}$ ]] || return 1
+    local i j sub len out rs
+    local -a G
+    for ((i = 0; i < 8; i++)); do
+        sub=${hex:$((i * 4)):4}
+        G[i]=$(printf '%x' $((16#$sub)))
+    done
+    local best_s=-1 best_l=0
+    for ((i = 0; i < 8; )); do
+        if [[ ${G[i]} == 0 ]]; then
+            j=$i
+            while ((j < 8)) && [[ ${G[j]} == 0 ]]; do
+                ((j++))
             done
-            is_nat_only=
-            [[ $is_wan_local ]] || is_nat_only=1
+            len=$((j - i))
+            ((len > best_l)) && { best_s=$i; best_l=$len; }
+            i=$j
+        else
+            ((i++))
         fi
+    done
+    if ((best_l >= 2)); then
+        local left=() right=()
+        for ((i = 0; i < best_s; i++)); do left+=("${G[i]}"); done
+        for ((i = best_s + best_l; i < 8; i++)); do right+=("${G[i]}"); done
+        out=
+        ((${#left[@]})) && { out=$(IFS=:; echo "${left[*]}"); out+=:; }
+        out+=::
+        if ((${#right[@]})); then
+            rs=$(IFS=:; echo "${right[*]}")
+            out+=$rs
+        fi
+    else
+        out=$(IFS=:; echo "${G[*]}")
+    fi
+    printf '%s\n' "$out"
+}
+
+# 列出本机已绑定的 IPv6 (/proc/net/if_inet6), 兼容无 ip 命令的精简系统
+read_if_inet6() {
+    [[ -r /proc/net/if_inet6 ]] || return 0
+    local hex a
+    while read -r hex _ _ _ _ _; do
+        [[ $hex ]] || continue
+        a=$(ipv6_compress "$hex") || continue
+        [[ $a ]] && printf '%s\n' "$a"
+    done < /proc/net/if_inet6
+}
+
+# 判断本机是否有"可用"的 IPv6 (非环回/链路本地的已绑定地址)
+have_global_v6() {
+    [[ -r /proc/net/if_inet6 ]] || return 1
+    local hex iface
+    while read -r hex _ _ _ _ iface; do
+        [[ $iface == lo ]] && continue
+        [[ ${hex,,} == fe80* || ${hex,,} == 00000000000000000000000000000001 ]] && continue
+        return 0
+    done < /proc/net/if_inet6
+    return 1
+}
+
+select_local_ip() {
+    local prompt="$1" var="$2" i pick idx a b
+    # 收集本机已绑定地址 (IPv4/IPv6), 兼容 iproute2 与 busybox ip:
+    # 直接匹配 inet/inet6 行提取地址, 不依赖 -o 单行/列号, 避免漏掉 IPv6.
+    is_local_ips=()
+    if [[ $(type -P ip) ]]; then
+        while read -r a; do
+            [[ $a ]] && is_local_ips+=("$a")
+        done < <(ip -4 addr show 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\//\1/p')
+        while read -r a; do
+            [[ $a ]] && is_local_ips+=("$a")
+        done < <(ip -6 addr show 2>/dev/null | sed -n 's/.*inet6 \([0-9A-Fa-f:]*\)\//\1/p')
+    fi
+    # hostname -I 作为补充来源 (部分精简环境只有该命令可用)
+    if [[ $(type -P hostname) ]]; then
+        while read -r a; do
+            [[ $a ]] && is_local_ips+=("$a")
+        done < <(hostname -I 2>/dev/null | tr ' ' '\n')
+    fi
+    # /proc/net/if_inet6 兜底: 无 ip 命令/精简 busybox 时也能读到本机绑定的 IPv6
+    while read -r a; do
+        [[ $a ]] && is_local_ips+=("$a")
+    done < <(read_if_inet6)
+    # 过滤: 只保留合法 IP, 剔除回环/链路本地/未指定/映射地址, 再去重
+    is_tmp_ip_list=()
+    for a in "${is_local_ips[@]}"; do
+        [[ ${a,,} == '::1' || ${a,,} == '::' || ${a,,} == fe80:* || $a =~ ^127\. || ${a,,} == ::ffff:* ]] && continue
+        validate_ip "$a" || continue
+        is_tmp_ip_list+=("$a")
+    done
+    is_local_ips=($(printf '%s\n' "${is_tmp_ip_list[@]}" | awk '!seen[$0]++'))
+
+    # NAT 探测 (结果缓存, change 分支13 一次会话会连选两次):
+    # 出口(v4/v6)地址不属于本机 → 视为"公网/NAT 出口", 置顶提供选择.
+    # 直接 wget 探测出口, 不调 get_ip, 避免其取不到 IP 时 err 退出中断菜单.
+    if [[ ! $is_nat_detected && ! $is_dont_get_ip && $(type -P wget) ]]; then
+        is_nat_detected=1
+        is_wan_ips=()
+        is_tmp_ip=$(_wget -4 -T 5 -qO- "$IP_API" 2>/dev/null | sed -n 's/^ip=//p' | head -1)
+        [[ $is_tmp_ip ]] && is_wan_ips+=("$is_tmp_ip")
+        # IPv6 出口: 仅当机器具备 v6 能力时探测 (有全局 v6 地址或默认 v6 路由),
+        # 避免无 v6 环境下 -6 连接卡顿
+        is_have_v6=
+        if [[ $(type -P ip) ]]; then
+            ip -6 addr show 2>/dev/null | grep -q 'inet6 .*scope global' && is_have_v6=1
+            ip -6 route show default 2>/dev/null | grep -q '^default' && is_have_v6=1
+        fi
+        have_global_v6 && is_have_v6=1
+        if [[ $is_have_v6 ]]; then
+            is_tmp_ip=$(_wget -6 -T 5 -qO- "$IP_API" 2>/dev/null | sed -n 's/^ip=//p' | head -1)
+            [[ $is_tmp_ip ]] && is_wan_ips+=("$is_tmp_ip")
+        fi
+        # 仅保留确实非本机、且互不重复的出口地址
+        is_wan_ok=()
+        for a in "${is_wan_ips[@]}"; do
+            validate_ip "$a" || continue
+            is_in_local=
+            for b in "${is_local_ips[@]}"; do
+                [[ $a == "$b" ]] && is_in_local=1 && break
+            done
+            [[ $is_in_local ]] && continue
+            is_in_wan=
+            for b in "${is_wan_ok[@]}"; do
+                [[ $a == "$b" ]] && is_in_wan=1 && break
+            done
+            [[ $is_in_wan ]] || is_wan_ok+=("$a")
+        done
+        is_wan_ips=("${is_wan_ok[@]}")
     fi
 
-    # 组装带标注的可选项 (值=纯 IP, 标注=来源说明); 公网(NAT)IP 置顶并作为默认项
+    # 组装带标注的可选项 (值=纯 IP, 标注=来源说明); 公网/NAT 出口 IP 置顶并作为默认项
     is_ip_opt=() is_ip_tag=()
-    if [[ $is_nat_only ]]; then
-        is_ip_opt+=("$is_wan_ip")
+    for a in "${is_wan_ips[@]}"; do
+        is_ip_opt+=("$a")
         is_ip_tag+=("公网/NAT出口")
-    fi
-    for i in "${is_local_ips[@]}"; do
-        is_ip_opt+=("$i")
+    done
+    for a in "${is_local_ips[@]}"; do
+        is_ip_opt+=("$a")
         is_ip_tag+=("本机地址")
     done
     [[ ${#is_ip_opt[@]} -eq 0 ]] && {
@@ -556,6 +659,15 @@ select_local_ip() {
         fi
         msg "输入${is_err}"
     done
+}
+
+# 判断所选 IP 是否为"本机已绑定地址"; 若非本机地址(公网/NAT 出口), change 分支13 需做 NAT 适配
+is_local_ip() {
+    local a
+    for a in "${is_local_ips[@]}"; do
+        [[ $a == "$1" ]] && return 0
+    done
+    return 1
 }
 
 # ======================== 配置创建 ========================
@@ -864,31 +976,32 @@ change() {
         }
         [[ $is_new_port && $is_new_port != $port ]] && port=$is_new_port
         # 2) 新进口IP (inbound listen)
-        # NAT 适配: 公网(NAT)IP 非本机绑定地址, 不能直接作为 listen; 实际仍监听在本机地址
-        # (承接 NAT 转发来的入站, 取本机第一地址), 公网 IP 仅作为展示/链接地址(create 以 nat_in_ tag 持久化).
+        # NAT 适配: 公网/NAT 出口 IP(含 IPv6)非本机绑定地址, 不能直接作为 listen;
+        # 实际仍监听在本机地址(承接 NAT 转发来的入站, 取本机第一地址),
+        # 公网 IP 仅作为展示/链接地址(create 以 nat_in_ tag 持久化).
         select_local_ip "\n请选择进口 IP:\n" is_new_listen_ip
         is_listen_ip=
         is_listen_disp=
         if [[ $is_new_listen_ip ]]; then
-            if [[ $is_new_listen_ip == "$is_wan_ip" && $is_nat_only ]]; then
+            if is_local_ip "$is_new_listen_ip"; then
+                is_listen_ip=$is_new_listen_ip
+            else
                 is_listen_disp=$is_new_listen_ip
                 is_listen_ip=${is_local_ips[0]}
-            else
-                is_listen_ip=$is_new_listen_ip
             fi
         fi
         # 3) 新出口IP (outbound source bind)
-        # NAT 适配: 选公网(NAT)IP 时, 出站默认即走公网 NAT 出口, 无需绑定本机不存在的公网地址,
-        # 实际不写 inet4_bind_address, 公网 IP 仅作展示(经 create 以 nat_out_ tag 持久化).
+        # NAT 适配: 选公网/NAT 出口 IP(含 IPv6)时, 出站默认即走该 NAT 出口, 无需绑定本机不存在的地址,
+        # 实际不写 inet4/inet6_bind_address, 公网 IP 仅作展示(经 create 以 nat_out_ tag 持久化).
         select_local_ip "\n请选择出口 IP:\n" is_new_bind_ip
         is_bind_ip=
         is_bind_disp=
         if [[ $is_new_bind_ip ]]; then
-            if [[ $is_new_bind_ip == "$is_wan_ip" && $is_nat_only ]]; then
-                is_bind_disp=$is_new_bind_ip
-            else
+            if is_local_ip "$is_new_bind_ip"; then
                 validate_ip "$is_new_bind_ip" || err "($is_new_bind_ip) 不是有效的 IPv4 / IPv6 地址."
                 is_bind_ip=$is_new_bind_ip
+            else
+                is_bind_disp=$is_new_bind_ip
             fi
         fi
         add $net

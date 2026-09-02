@@ -181,9 +181,21 @@ get_port() {
 }
 
 get_pbk() {
-    is_tmp_pbk=($($is_core_bin generate reality-keypair | sed 's/.*://'))
-    is_public_key=${is_tmp_pbk[1]}
-    is_private_key=${is_tmp_pbk[0]}
+    local try raw
+    is_public_key=
+    is_private_key=
+    for ((try = 0; try < 3; try++)); do
+        raw=$($is_core_bin generate reality-keypair 2>&1)
+        is_tmp_pbk=($(sed 's/.*://' <<<"$raw"))
+        [[ ${#is_tmp_pbk[@]} -ge 2 ]] && {
+            is_private_key=${is_tmp_pbk[0]}
+            is_public_key=${is_tmp_pbk[1]}
+            return 0
+        }
+    done
+    # 3 次均失败: 打印 sing-box 输出, 便于定位 (避免再生成空密钥的节点)
+    _yellow "\n警告: 获取 Reality 密钥失败 (已尝试 3 次). sing-box 输出如下:"
+    msg "$raw"
 }
 
 # build the json fragment to bind the outbound to a specified IP (IPv4/IPv6)
@@ -1436,7 +1448,8 @@ get() {
             is_json_str=$(cat "$is_conf_dir/$is_config_file") || err "无法读取此文件: $is_config_file"
             load_config_vars "$is_config_file"
 
-            if [[ $is_private_key ]]; then
+            # 识别 reality: 有私钥, 或 tls.reality.enabled=true (兼容密钥为空的历史损坏节点, 便于进菜单重写修复)
+            if [[ $is_private_key ]] || jq -e '.inbounds[0].tls.reality.enabled == true' <<<"$is_json_str" &>/dev/null; then
                 is_reality=1
                 net_type+=reality
                 # 从假 outbound tag 中抠回 reality 公钥（见 create 时的约定）
@@ -1561,7 +1574,13 @@ get() {
         *reality*)
             net=reality
             [[ ! $is_servername ]] && is_servername=$is_random_servername
-            [[ ! $is_private_key ]] && get_pbk
+            if [[ ! $is_private_key ]]; then
+                get_pbk
+                [[ $is_private_key && $is_public_key ]] || {
+                    msg "可手动执行确认: $is_core_bin generate reality-keypair"
+                    err "Reality 密钥生成失败, 无法创建节点."
+                }
+            fi
             is_json_add="tls:{enabled:true,server_name:\$servername,reality:{enabled:true,handshake:{server:\$servername,server_port:443},private_key:\$private_key,short_id:[\"\"]}}"
             [[ $is_lower =~ "http" ]] && {
                 is_json_add="$is_json_add,transport:{type:\"http\"}"

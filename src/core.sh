@@ -401,17 +401,18 @@ is_test() {
 is_port_used() {
     local port=$1
     if [[ -z $is_used_port ]]; then
+        # Optimized for low-end NAT machines: use lightweight commands first
         if type -P ss &>/dev/null; then
-            is_used_port="$(ss -tlnpH 2>/dev/null; ss -ulnH 2>/dev/null)"
+            # Use -H (no header) and awk for faster port extraction
+            is_used_port="$(ss -tlnH 2>/dev/null | awk -F: '{print $NF}' | sort -nu; ss -ulnH 2>/dev/null | awk -F: '{print $NF}' | sort -nu)"
         elif type -P netstat &>/dev/null; then
-            is_used_port="$(netstat -tnlp 2>/dev/null; netstat -unlp 2>/dev/null)"
+            is_used_port="$(netstat -tln 2>/dev/null | awk -F: '{print $NF}' | sort -nu; netstat -uln 2>/dev/null | awk -F: '{print $NF}' | sort -nu)"
         else
             is_cant_test_port=1
             msg "$is_warn 无法检测端口是否可用."
-            msg "请执行: $(_yellow "${cmd} update -y; ${cmd} install net-tools -y") 来修复此问题."
+            msg "请执行：$(_yellow "${cmd} update -y; ${cmd} install net-tools -y") 来修复此问题."
             return 1
         fi
-        is_used_port="$(sed -n 's/.*:\([0-9]\+\).*/\1/p' <<<"$is_used_port" | sort -nu)"
     fi
     grep -qx "$port" <<<"$is_used_port"
 }

@@ -136,7 +136,7 @@ show_help() {
     exit 0
 }
 
-# install dependent pkg
+# install dependent pkg (synchronous, no background processes for low-end machines)
 install_pkg() {
     cmd_not_found=
     for i in $*; do
@@ -146,20 +146,20 @@ install_pkg() {
         pkg=$(echo $cmd_not_found | sed 's/,/ /g')
         log_msg warn "安装依赖包 >${pkg}"
         if [[ $cmd =~ apk ]]; then
-            apk update &>/dev/null
-            apk add $pkg &>/dev/null
+            apk update >/dev/null 2>&1
+            apk add $pkg >/dev/null 2>&1
             pkg_ok=$?
         else
-            $cmd install -y $pkg &>/dev/null
+            $cmd install -y $pkg >/dev/null 2>&1
             pkg_ok=$?
             if [[ $pkg_ok != 0 ]]; then
-                [[ $cmd =~ yum ]] && yum install epel-release -y &>/dev/null
+                [[ $cmd =~ yum ]] && yum install epel-release -y >/dev/null 2>&1
                 if [[ $cmd =~ zypper ]]; then
-                    $cmd --non-interactive refresh &>/dev/null
+                    $cmd --non-interactive refresh >/dev/null 2>&1
                 else
-                    $cmd update -y &>/dev/null
+                    $cmd update -y >/dev/null 2>&1
                 fi
-                $cmd install -y $pkg &>/dev/null
+                $cmd install -y $pkg >/dev/null 2>&1
                 pkg_ok=$?
             fi
         fi
@@ -169,7 +169,7 @@ install_pkg() {
     fi
 }
 
-# download file
+# download file (sequential mode for low-end NAT machines)
 download() {
     case $1 in
     core)
@@ -207,7 +207,7 @@ get_ip() {
     [[ -z $ip ]] && export "$(_wget -6 -qO- https://one.one.one.one/cdn-cgi/trace | grep ip=)" &>/dev/null
 }
 
-# check background tasks status
+# check status (synchronous, no background processes for low-end machines)
 check_status() {
     # dependent pkg install fail
     [[ ! -f $is_pkg_ok ]] && {
@@ -237,11 +237,11 @@ check_status() {
     else
         [[ ! $is_fail ]] && {
             is_wget=1
-            [[ ! $is_core_file ]] && download core &
-            [[ ! $local_install ]] && download sh &
-            [[ $jq_not_found ]] && download jq &
+            # Sequential downloads for low-end NAT machines (avoid parallel connection overhead)
+            [[ ! $is_core_file ]] && download core
+            [[ ! $local_install ]] && download sh
+            [[ $jq_not_found ]] && download jq
             get_ip
-            wait
             check_status
         }
     fi
@@ -357,31 +357,31 @@ main() {
     # install dependent pkg
     if [[ $cmd =~ apk ]]; then
         # Alpine: force install full versions to replace BusyBox applets
-        apk update &>/dev/null
-        apk add $is_pkg &>/dev/null
+        apk update >/dev/null 2>&1
+        apk add $is_pkg >/dev/null 2>&1
         [[ $? == 0 ]] && >$is_pkg_ok
     else
-        install_pkg $is_pkg &
+        install_pkg $is_pkg
     fi
 
-    # jq
+    # jq - check and download synchronously (avoid parallel issues on low-end machines)
     if [[ $(type -P jq) ]]; then
         >$is_jq_ok
     else
         jq_not_found=1
+        download jq
     fi
-    # if wget installed. download core, sh, jq, get ip
+    
+    # download core, sh sequentially for low-end NAT machines
     [[ $is_wget ]] && {
-        [[ ! $is_core_file ]] && download core &
-        [[ ! $local_install ]] && download sh &
-        [[ $jq_not_found ]] && download jq &
-        get_ip
+        [[ ! $is_core_file ]] && download core
+        [[ ! $local_install ]] && download sh
     }
 
-    # waiting for background tasks is done
-    wait
+    # get server ip (only after downloads complete)
+    get_ip
 
-    # check background tasks status
+    # check download status (sequential mode, no background tasks)
     check_status
 
     # test $is_core_file
